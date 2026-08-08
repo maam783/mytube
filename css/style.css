@@ -98,6 +98,29 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 .sync-btn:disabled { opacity: 0.5; }
 
+/* Auf schmalen Displays drängt der Sync-Knopf die Tabs sonst aus dem Bild —
+   „Einstellungen" war dann gar nicht mehr erreichbar. Tabs auf eigene Zeile. */
+@media (max-width: 640px) {
+  .topbar { gap: 8px; }
+  .brand { flex: 1; }
+  .tabs { order: 3; flex-basis: 100%; flex: none; }
+}
+
+/* Speichern bleibt am unteren Rand stehen, statt unter vier Formularblöcken
+   zu verschwinden. */
+.savebar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding: 12px 0 max(12px, env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--bg) 65%, transparent);
+}
+.savehint { color: var(--muted); font-size: 13px; }
+
 /* ---------- Fortschritt ---------- */
 
 .progress[hidden] { display: none; }

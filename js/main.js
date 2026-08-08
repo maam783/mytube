@@ -61,6 +61,11 @@ const watchUrl = (id) => `https://www.youtube.com/watch?v=${id}`;
 const view = document.getElementById('view');
 let syncing = false;
 
+// Solange die Einstellungen offen sind, hängt hier eine Funktion, die noch nicht
+// gespeicherte Eingaben übernimmt. Sonst liest „Aktualisieren" die alten Werte
+// und verlangt einen Key, den du gerade eingetippt hast.
+let flushPendingSettings = null;
+
 async function loadContext() {
   const [settings, videos, channels] = await Promise.all([
     S.load(), db.getAll('videos'), db.getAll('channels'),
@@ -87,8 +92,17 @@ async function updateVideo(id, patch) {
 
 async function runSync() {
   if (syncing) return;
+
+  // Erst übernehmen, was in einem offenen Formular steht — sonst startet der
+  // Lauf mit veralteten Werten.
+  if (flushPendingSettings) { try { await flushPendingSettings(); } catch { /* egal */ } }
+
   const settings = await S.load();
-  if (!settings.ytKey) { location.hash = '#/settings'; toast('Zuerst den YouTube-API-Key eintragen.', 'warn'); return; }
+  if (!settings.ytKey) {
+    location.hash = '#/settings';
+    toast('Es ist noch kein YouTube-API-Key hinterlegt.', 'warn');
+    return;
+  }
 
   syncing = true;
   const btn = document.getElementById('sync-btn');
@@ -565,12 +579,26 @@ async function viewSettings() {
       hint ? el('p', { class: 'hint' }, hint) : null);
   };
 
-  // Schlüssel
+  // Schlüssel.
+  // `type=password` verhindert, dass iOS den ersten Buchstaben großschreibt —
+  // das allein würde einen API-Key unbrauchbar machen. Die data-*-Attribute
+  // halten Passwort-Manager (iCloud-Schlüsselbund, 1Password, Bitwarden) davon
+  // ab, hier fremde Zugangsdaten hineinzuschreiben.
+  const keyAttrs = {
+    type: 'password',
+    autocomplete: 'off',
+    autocapitalize: 'off',
+    autocorrect: 'off',
+    spellcheck: 'false',
+    'data-1p-ignore': 'true',
+    'data-lpignore': 'true',
+    'data-bwignore': 'true',
+  };
   wrap.append(el('div', { class: 'card' },
     el('h2', { style: 'margin-top:0' }, 'Schlüssel'),
-    field('ytKey', 'YouTube Data API v3 — API-Key', { type: 'password', autocomplete: 'off' },
+    field('ytKey', 'YouTube Data API v3 — API-Key', keyAttrs,
       'console.cloud.google.com → Projekt → YouTube Data API v3 aktivieren → Anmeldedaten → API-Schlüssel. Kein OAuth nötig.'),
-    field('anthropicKey', 'Anthropic API-Key (optional)', { type: 'password', autocomplete: 'off' },
+    field('anthropicKey', 'Anthropic API-Key (optional)', keyAttrs,
       'Nur für die KI-Bewertung. Bleibt auf diesem Gerät und geht ausschließlich an api.anthropic.com.')));
 
   // Filter
@@ -625,26 +653,38 @@ async function viewSettings() {
       field('itemsPerChannel', 'Videos pro Kanal je Lauf', { type: 'number', min: 5, max: 50 }),
       field('keepDays', 'Daten behalten (Tage)', { type: 'number', min: 7, max: 365 }))));
 
-  wrap.append(el('button', {
-    class: 'btn primary',
-    onclick: async () => {
-      const patch = {};
-      for (const [key, input] of Object.entries(fields)) {
-        patch[key] = input.type === 'number' ? Number(input.value) : input.value.trim();
-      }
-      patch.languages = langInput.value.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
-      patch.sortMode = sortSelect.value;
-      patch.aiEnabled = aiToggle.checked;
-      patch.model = modelSelect.value;
-      if (patch.aiEnabled && !patch.anthropicKey) {
-        toast('Für die KI-Bewertung fehlt der Anthropic-Key.', 'warn');
-        patch.aiEnabled = false;
-      }
-      await S.save(patch);
-      toast('Gespeichert.');
-      render();
-    },
-  }, 'Speichern'));
+  const collect = () => {
+    const patch = {};
+    for (const [key, input] of Object.entries(fields)) {
+      patch[key] = input.type === 'number' ? Number(input.value) : input.value.trim();
+    }
+    patch.languages = langInput.value.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+    patch.sortMode = sortSelect.value;
+    patch.model = modelSelect.value;
+    patch.aiEnabled = aiToggle.checked && Boolean(patch.anthropicKey);
+    return patch;
+  };
+
+  const persist = () => S.save(collect());
+  flushPendingSettings = persist;
+
+  // Jedes Feld wird beim Verlassen übernommen. Der Knopf bleibt als Bestätigung,
+  // aber nichts hängt mehr davon ab, dass du ihn unten im Formular findest.
+  wrap.addEventListener('change', () => { persist(); });
+
+  wrap.append(el('div', { class: 'savebar' },
+    el('button', {
+      class: 'btn primary',
+      onclick: async () => {
+        if (aiToggle.checked && !fields.anthropicKey.value.trim()) {
+          toast('Für die KI-Bewertung fehlt der Anthropic-Key — sie bleibt aus.', 'warn');
+          aiToggle.checked = false;
+        }
+        await persist();
+        toast('Gespeichert.');
+      },
+    }, 'Speichern'),
+    el('span', { class: 'savehint' }, 'Änderungen werden automatisch übernommen')));
 
   // Backup
   wrap.append(el('div', { class: 'card', style: 'margin-top:24px' },
@@ -803,6 +843,7 @@ const routes = [
 
 async function render() {
   const hash = location.hash || '#/';
+  flushPendingSettings = null; // gilt nur, solange die Einstellungen offen sind
   for (const link of document.querySelectorAll('.tabs a')) {
     const active = link.getAttribute('href') === hash
       || (link.dataset.tab === 'feed' && hash.startsWith('#/v/'));
