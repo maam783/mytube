@@ -182,6 +182,57 @@ export async function scoreBatch(videos, { apiKey, model, manifest, examples = [
   return { results, usage: res.usage, spend };
 }
 
+const QUERY_SCHEMA = {
+  type: 'object',
+  properties: {
+    queries: {
+      type: 'array',
+      items: { type: 'string', description: 'Ein YouTube-Suchbegriff' },
+    },
+  },
+  required: ['queries'],
+  additionalProperties: false,
+};
+
+/**
+ * Schlägt Suchbegriffe vor, mit denen sich Videos in derselben Interessen-
+ * richtung finden lassen — aber von Kanälen, die noch nicht abonniert sind.
+ */
+export async function suggestQueries(manifest, channelTitles, { apiKey, model, budgetUsd }) {
+  const spend = await getSpend();
+  if (budgetUsd > 0 && spend.usd >= budgetUsd) throw new BudgetExceeded(spend.usd, budgetUsd);
+
+  const prompt = `Diese Person sucht YouTube-Videos, die zu ihren Interessen passen, `
+    + `aber von Kanälen stammen, die sie noch nicht abonniert hat.\n\n`
+    + `## Ihr Manifest\n${manifest}\n\n`
+    + `## Kanäle, die sie bereits abonniert hat\n${channelTitles.slice(0, 80).join(', ')}\n\n`
+    + `Schlage 10 bis 14 Suchbegriffe vor.\n\n`
+    + `Regeln:\n`
+    + `- Themen, keine Kanalnamen. Die abonnierten Kanäle sollen NICHT gefunden werden.\n`
+    + `- Zwei bis vier Wörter. Zu enge Begriffe liefern nur Videos mit wenigen hundert Aufrufen.\n`
+    + `- Überwiegend englisch, weil dort die Reichweite ist. Deutsch nur, wo das Thema deutsch ist.\n`
+    + `- Breit genug für viele Treffer, eng genug um zum Manifest zu passen.\n`
+    + `- Keine Suchoperatoren, keine Anführungszeichen.`;
+
+  const res = await client(apiKey).messages.create({
+    model,
+    max_tokens: 1000,
+    messages: [{ role: 'user', content: prompt }],
+    output_config: { format: { type: 'json_schema', schema: QUERY_SCHEMA } },
+  });
+
+  await addSpend(res.usage);
+  if (res.stop_reason === 'refusal') throw new Error('Claude hat die Anfrage abgelehnt.');
+
+  const text = res.content.find((b) => b.type === 'text')?.text || '';
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw new Error('Claude hat kein gültiges JSON geliefert.'); }
+
+  return [...new Set((parsed.queries || [])
+    .map((q) => String(q).trim())
+    .filter((q) => q.length > 1 && q.length < 80))];
+}
+
 /** Die zuletzt bewerteten Videos als Few-Shot-Beispiele fürs nächste Prompt. */
 export async function recentExamples(limit = 15) {
   const [feedback, videos] = await Promise.all([db.getAll('feedback'), db.getAll('videos')]);

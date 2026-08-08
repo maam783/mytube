@@ -417,3 +417,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
   animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Entdeckte Videos sichtbar von Abo-Videos unterscheiden. */
+.badge.discover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}

@@ -26,16 +26,41 @@ export function isShort(video, settings, { useDuration = false } = {}) {
   return false;
 }
 
+/**
+ * Wie viele Aufrufe ein entdecktes Video haben muss.
+ *
+ * Ein zwei Stunden altes Video kann keine 100.000 Aufrufe haben — es hatte noch
+ * keine Gelegenheit. Deshalb steigt die Hürde linear an und ist erst nach
+ * `discoveryRampDays` voll gefordert. Bei 100.000 in 3 Tagen heißt das: nach
+ * einem Tag reichen 33.000, nach drei Tagen sind es 100.000.
+ */
+export function requiredViews(video, settings, now = Date.now()) {
+  const ramp = Math.max(0.25, settings.discoveryRampDays || 3);
+  const age = Math.max(0, ageDays(video, now));
+  return Math.round((settings.discoveryMinViews || 0) * Math.min(1, age / ramp));
+}
+
 /** Warum ein Video nicht im Feed steht — oder null, wenn es durchkommt. */
-export function stage0Reject(video, settings, channelsById, now = Date.now()) {
+export function stage0Reject(video, settings, channelsById, now = Date.now(), blocked = new Set()) {
   if (video.dismissed) return 'weggewischt';
   if (video.watched) return 'gesehen';
 
-  const channel = channelsById.get(video.channelId);
-  // Kein Kanaleintrag = Kanal wurde entfernt. Ohne diese Zeile blieben seine
-  // Videos für immer im Feed, weil die Stumm-Prüfung darunter ins Leere lief.
-  if (!channel) return 'Kanal entfernt';
-  if (channel.active === false) return 'Kanal stummgeschaltet';
+  if (video.source === 'discovery') {
+    // Entdeckte Videos stammen aus Kanälen, die du nicht abonniert hast — die
+    // Kanalprüfung unten würde sie alle verwerfen.
+    if (blocked.has(video.channelId)) return 'Kanal blockiert';
+    if (channelsById.get(video.channelId)?.active === false) return 'Kanal stummgeschaltet';
+    const noetig = requiredViews(video, settings, now);
+    if ((video.viewCount || 0) < noetig) {
+      return `zu wenig Aufrufe (${noetig.toLocaleString('de-DE')} nötig)`;
+    }
+  } else {
+    const channel = channelsById.get(video.channelId);
+    // Kein Kanaleintrag = Kanal wurde entfernt. Ohne diese Zeile blieben seine
+    // Videos für immer im Feed, weil die Stumm-Prüfung darunter ins Leere lief.
+    if (!channel) return 'Kanal entfernt';
+    if (channel.active === false) return 'Kanal stummgeschaltet';
+  }
 
   const age = ageDays(video, now);
   if (age > settings.maxAgeDays) return `älter als ${settings.maxAgeDays} Tage`;
@@ -60,11 +85,11 @@ export function stage0Reject(video, settings, channelsById, now = Date.now()) {
   return null;
 }
 
-export function stage0(videos, settings, channelsById, now = Date.now()) {
+export function stage0(videos, settings, channelsById, now = Date.now(), blocked = new Set()) {
   const kept = [];
   const rejected = new Map();
   for (const v of videos) {
-    const why = stage0Reject(v, settings, channelsById, now);
+    const why = stage0Reject(v, settings, channelsById, now, blocked);
     if (why) rejected.set(why, (rejected.get(why) || 0) + 1);
     else kept.push(v);
   }
@@ -90,11 +115,15 @@ export function rank(videos, settings, channelsById, now = Date.now()) {
   }
 
   const halfLife = Math.max(0.5, settings.halfLifeDays);
+  const popW = Math.max(0, settings.popularityWeight ?? 0);
   const scored = videos.map((v) => {
     const weight = channelsById.get(v.channelId)?.weight ?? 1;
     const norm = (v.score == null ? 50 : v.score) / 100;
     const decay = Math.exp(-ageDays(v, now) / halfLife);
-    return { video: v, base: norm * decay * weight };
+    // „Mehr Aufrufe ist besser" — aber logarithmisch, sonst schlägt ein
+    // Millionen-Video alles andere tot. 100.000 ergibt ~1,36, eine Million ~1,43.
+    const pop = 1 + popW * (Math.log10(1 + (v.viewCount || 0)) / 7);
+    return { video: v, base: norm * decay * weight * pop };
   });
 
   const pool = scored.slice().sort((a, b) => b.base - a.base);

@@ -22,6 +22,14 @@ export const DEFAULTS = {
   batchSize: 25,
   dailyBudgetUsd: 0.50,   // Anthropic rechnet in USD ab
 
+  // Entdecken — Vorschläge außerhalb deiner Abos
+  discoveryEnabled: false,
+  discoveryQueries: [],        // ein Suchbegriff pro Zeile
+  discoverySearchesPerDay: 6,  // je 100 Quota-Einheiten
+  discoveryMinViews: 100_000,  // ab `discoveryRampDays` voll gefordert
+  discoveryRampDays: 3,        // frische Videos hatten noch keine Chance
+  popularityWeight: 0.5,       // „mehr Aufrufe ist besser" im KI-Ranking
+
   // Sync
   concurrency: 5,
   itemsPerChannel: 15,

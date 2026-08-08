@@ -68,11 +68,23 @@ let flushPendingSettings = null;
 let syncAbort = null;
 
 async function loadContext() {
-  const [settings, videos, channels] = await Promise.all([
-    S.load(), db.getAll('videos'), db.getAll('channels'),
+  const [settings, videos, channels, blockedList] = await Promise.all([
+    S.load(), db.getAll('videos'), db.getAll('channels'), db.kvGet('blockedChannels', []),
   ]);
   const channelsById = new Map(channels.map((c) => [c.id, c]));
-  return { settings, videos, channels, channelsById };
+  return { settings, videos, channels, channelsById, blocked: new Set(blockedList) };
+}
+
+async function blockChannel(channelId) {
+  const liste = await db.kvGet('blockedChannels', []);
+  if (!liste.includes(channelId)) await db.kvSet('blockedChannels', [...liste, channelId]);
+}
+
+async function unblockChannel(channelId) {
+  const liste = await db.kvGet('blockedChannels', []);
+  if (liste.includes(channelId)) {
+    await db.kvSet('blockedChannels', liste.filter((id) => id !== channelId));
+  }
 }
 
 async function recordFeedback(videoId, type, value) {
@@ -166,7 +178,7 @@ async function runSync() {
 // ---------- Feed ----------
 
 async function viewFeed() {
-  const { settings, videos, channels, channelsById } = await loadContext();
+  const { settings, videos, channels, channelsById, blocked } = await loadContext();
 
   if (!settings.ytKey) return viewWelcome();
   if (!channels.length) {
@@ -176,7 +188,7 @@ async function viewFeed() {
       el('a', { class: 'btn primary', href: '#/channels' }, 'Kanäle importieren'));
   }
 
-  const { kept, rejected } = stage0(videos, settings, channelsById);
+  const { kept, rejected } = stage0(videos, settings, channelsById, Date.now(), blocked);
   const ordered = rank(kept, settings, channelsById);
 
   const wrap = el('div');
@@ -234,7 +246,10 @@ function thumbButton(video, value, label, title) {
 function feedItem(v, exploration) {
   const open = () => { location.hash = `#/v/${v.id}`; };
 
+  const entdeckt = v.source === 'discovery';
+
   const badges = el('div', { class: 'badges' },
+    entdeckt ? el('span', { class: 'badge discover' }, 'Entdeckt · nicht abonniert') : null,
     exploration ? el('span', { class: 'badge explore' }, 'Ausprobiert für dich') : null,
     v.score != null ? el('span', { class: 'badge score' }, `Score ${v.score}`) : null,
     v.liveStatus === 'live' ? el('span', { class: 'badge' }, 'Live') : null,
@@ -265,7 +280,37 @@ function feedItem(v, exploration) {
             await recordFeedback(v.id, 'dismiss', -0.3);
             item.remove();
           },
-        }, 'Ausblenden'))));
+        }, 'Ausblenden'),
+        // Nur bei Entdeckungen: den Kanal dauerhaft aufnehmen oder loswerden.
+        entdeckt ? el('button', {
+          class: 'btn',
+          onclick: async () => {
+            const s = await S.load();
+            try {
+              const kanal = await yt.resolveChannel(v.channelId, s.ytKey);
+              await db.put('channels', kanal);
+              // Sonst wäre der Kanal gleichzeitig abonniert und blockiert.
+              await unblockChannel(v.channelId);
+              toast(`„${kanal.title}" abonniert.`);
+              render();
+            } catch (e) {
+              toast(`Konnte nicht abonnieren: ${e.message}`, 'error');
+            }
+          },
+        }, '+ Kanal') : null,
+        entdeckt ? el('button', {
+          class: 'btn danger',
+          onclick: async () => {
+            await blockChannel(v.channelId);
+            const abonniert = await db.get('channels', v.channelId);
+            toast(abonniert
+              // „Nie wieder" betrifft nur Vorschläge. Ein Abo stillschweigend
+              // zu kündigen wäre mehr, als der Knopf verspricht.
+              ? `„${v.channelTitle}" wird nicht mehr vorgeschlagen — dein Abo bleibt bestehen.`
+              : `„${v.channelTitle}" wird nicht mehr vorgeschlagen.`);
+            render();
+          },
+        }, 'Nie wieder') : null)));
 
   return item;
 }
@@ -727,7 +772,66 @@ async function viewSettings() {
     el('div', { class: 'row' },
       field('dailyBudgetUsd', 'Tagesbudget (USD, harter Stop)', { type: 'number', min: 0, step: 0.05 }),
       field('batchSize', 'Videos pro Anfrage', { type: 'number', min: 5, max: 40 }),
-      field('halfLifeDays', 'Halbwertszeit Ranking (Tage)', { type: 'number', min: 1, step: 0.5 }))));
+      field('halfLifeDays', 'Halbwertszeit Ranking (Tage)', { type: 'number', min: 1, step: 0.5 }),
+      field('popularityWeight', 'Gewicht der Aufrufzahlen (0 = aus)', { type: 'number', min: 0, max: 2, step: 0.1 }))));
+
+  // --- Entdecken ---
+  const discToggle = el('input', { type: 'checkbox' });
+  discToggle.checked = Boolean(s.discoveryEnabled);
+
+  const queryBox = el('textarea', {
+    style: 'min-height:150px',
+    placeholder: 'Ein Suchbegriff pro Zeile:\nartificial intelligence\nTesla FSD\nmachine shop build',
+  });
+  queryBox.value = (s.discoveryQueries || []).join('\n');
+
+  const discStatus = el('p', { class: 'hint' });
+
+  wrap.append(el('div', { class: 'card' },
+    el('h2', { style: 'margin-top:0' }, 'Entdecken'),
+    el('p', { class: 'hint', style: 'margin-top:0' },
+      'Sucht Videos außerhalb deiner Abos. Jede Suche kostet 100 von 10.000 '
+      + 'Quota-Einheiten am Tag — der Abo-Abgleich braucht davon nur rund 80.'),
+    el('label', { class: 'field' },
+      el('span', {}, 'Vorschläge außerhalb der Abos'),
+      el('div', { style: 'display:flex;align-items:center;gap:10px;min-height:44px' },
+        discToggle, el('span', {}, 'Einschalten'))),
+    el('label', { class: 'field' }, el('span', {}, 'Themen'), queryBox),
+    el('div', { style: 'margin-bottom:14px' },
+      el('button', {
+        class: 'btn',
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          const eingaben = collect();
+          if (!eingaben.anthropicKey) { toast('Dafür wird der Anthropic-Key gebraucht.', 'warn'); return; }
+          btn.disabled = true;
+          discStatus.textContent = 'Claude liest dein Manifest…';
+          try {
+            const [manifest, kanaele] = await Promise.all([S.getManifest(), db.getAll('channels')]);
+            const vorschlaege = await ai.suggestQueries(manifest, kanaele.map((c) => c.title), {
+              apiKey: eingaben.anthropicKey,
+              model: eingaben.model,
+              budgetUsd: eingaben.dailyBudgetUsd,
+            });
+            const vorhanden = queryBox.value.split('\n').map((x) => x.trim()).filter(Boolean);
+            queryBox.value = [...new Set([...vorhanden, ...vorschlaege])].join('\n');
+            discStatus.textContent = `${vorschlaege.length} Themen ergänzt — streich raus, was nicht passt.`;
+            await persist();
+          } catch (err) {
+            discStatus.textContent = '';
+            toast(err.message, 'error', 7000);
+          } finally { btn.disabled = false; }
+        },
+      }, 'Themen aus dem Manifest vorschlagen')),
+    discStatus,
+    el('div', { class: 'row' },
+      field('discoverySearchesPerDay', 'Suchen pro Tag', { type: 'number', min: 0, max: 40 }),
+      field('discoveryMinViews', 'Nötige Aufrufe', { type: 'number', min: 0, step: 10000 }),
+      field('discoveryRampDays', 'Ab wie vielen Tagen voll gefordert', { type: 'number', min: 0.5, step: 0.5 })),
+    el('p', { class: 'hint' },
+      'Die Hürde steigt mit dem Alter: Ein Video, das erst ein Drittel der Zeit '
+      + 'hatte, muss auch nur ein Drittel der Aufrufe haben. Sonst würde jedes '
+      + 'frische Video scheitern, nur weil es noch keine Gelegenheit hatte.')));
 
   // Sync
   wrap.append(el('div', { class: 'card' },
@@ -746,6 +850,8 @@ async function viewSettings() {
     patch.sortMode = sortSelect.value;
     patch.model = modelSelect.value;
     patch.aiEnabled = aiToggle.checked && Boolean(patch.anthropicKey);
+    patch.discoveryQueries = queryBox.value.split('\n').map((x) => x.trim()).filter(Boolean);
+    patch.discoveryEnabled = discToggle.checked && patch.discoveryQueries.length > 0;
     return patch;
   };
 

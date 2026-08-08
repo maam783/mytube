@@ -247,6 +247,32 @@ export async function fetchNewVideoIds(channel, key, { known, itemsPerChannel = 
   return { ids: fresh, mode, knownShorts: shortIds, notes };
 }
 
+// --- Suche (Entdecken) ---
+
+/**
+ * Sucht Videos zu einem Thema.
+ *
+ * `search.list` kostet 100 Einheiten — hundertmal so viel wie ein Playlist-Abruf.
+ * Deshalb immer `maxResults: 50` holen: gleicher Preis, dreifache Ausbeute.
+ * `order=viewCount` passt zu „mehr Aufrufe ist besser", schwemmt aber viel
+ * Fremdsprachiges hoch; `relevanceLanguage` dämpft das.
+ */
+export async function searchVideos(query, key, { publishedAfter, language = 'de' } = {}) {
+  const data = await request('search', {
+    part: 'snippet',
+    type: 'video',
+    q: query,
+    order: 'viewCount',
+    publishedAfter,
+    relevanceLanguage: language,
+    maxResults: 50,
+  }, key, { cost: QUOTA_COST.search });
+
+  return (data.items || [])
+    .map((i) => i.id?.videoId)
+    .filter(Boolean);
+}
+
 // --- Metadaten ---
 
 export async function fetchVideoDetails(ids, key) {

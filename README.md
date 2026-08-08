@@ -101,6 +101,62 @@ ein Tagesbudget mit hartem Stop.
 
 ---
 
+## Sortierung
+
+**Neueste zuerst** — strikt chronologisch. Was die Stufe-0-Filter überlebt, steht
+nach Datum sortiert da. Keine Gewichtung, keine Überraschung.
+
+**KI-Ranking** — braucht Bewertungen und rechnet pro Video:
+
+```
+Score/100 × exp(−Alter/Halbwertszeit) × Kanalgewicht × Beliebtheit
+```
+
+Bei Halbwertszeit 5 ist ein 5 Tage altes Video noch 37 % wert, ein 10 Tage altes
+14 %. Die Beliebtheit geht logarithmisch ein (`1 + Gewicht × log₁₀(Aufrufe)/7`),
+damit ein Millionen-Video nicht alles andere totschlägt: 100.000 ergibt ~1,36,
+eine Million ~1,43. Mit `popularityWeight: 0` ist das aus.
+
+Danach zwei Korrekturen: Jedes weitere Video desselben Kanals wird mit **0,6**
+multipliziert, damit ein produktiver Kanal nicht die halbe Seite belegt. Und
+jede 10. Position ist ein **Exploration-Slot** aus dem Mittelfeld (Score 40–70).
+
+---
+
+## Entdecken — Vorschläge außerhalb der Abos
+
+Sucht Videos zu Themen, die du vorgibst, und zeigt sie mit dem Hinweis
+*„Entdeckt · nicht abonniert"*. Zwei zusätzliche Knöpfe: **+ Kanal** abonniert
+ihn, **Nie wieder** setzt ihn auf die Blockliste.
+
+**Die Aufruf-Hürde** ist der Kern. Ein Video muss sich beweisen, bevor es dir
+vorgeschlagen wird — aber ein zwei Stunden altes Video kann keine 100.000
+Aufrufe haben. Deshalb steigt die Hürde linear mit dem Alter:
+
+```
+nötige Aufrufe = discoveryMinViews × min(1, Alter / discoveryRampDays)
+```
+
+Mit den Standardwerten: nach einem Tag reichen 33.000, nach zwei Tagen 67.000,
+ab drei Tagen sind es 100.000. Wer die Hürde reißt, bleibt in der Datenbank —
+senkst du sie später, erscheinen die Videos ohne neuen API-Aufruf.
+
+**Kosten:** Jede Suche kostet 100 der 10.000 Quota-Einheiten pro Tag; der
+Abo-Abgleich braucht nur rund 80. Sechs Suchen am Tag sind also unkritisch. Pro
+Suche werden 50 Treffer geholt — gleicher Preis wie 15, dreifache Ausbeute.
+
+**Themen** kannst du selbst eintragen oder über *„Themen aus dem Manifest
+vorschlagen"* von Claude ableiten lassen. Zu enge Begriffe liefern nur Videos
+mit wenigen hundert Aufrufen und reißen die Hürde alle — zwei bis vier Wörter,
+überwiegend englisch, funktionieren am besten.
+
+Gefiltert wird zusätzlich nach Sprache (die Suche schwemmt viel Fremdsprachiges
+hoch), nach Dauer (viele Treffer mit hohen Aufrufen sind Shorts) und gegen die
+Blockliste. Videos von Kanälen, die du schon abonniert hast, werden gar nicht
+erst als Entdeckung geführt.
+
+---
+
 ## Vor der Abreise abhaken
 
 - [ ] API-Key eingetragen, **Aktualisieren** einmal erfolgreich gelaufen

@@ -111,6 +111,71 @@ export async function run(onProgress = () => {}, signal = undefined) {
     + (droppedShort ? `, ${droppedShort} Shorts` : '')
     + '.');
 
+  // --- 2b. Entdecken: Vorschläge außerhalb der Abos ---
+  let discovered = 0;
+  if (settings.discoveryEnabled && settings.discoveryQueries?.length) {
+    const heute = new Date().toISOString().slice(0, 10);
+    let zustand = await db.kvGet('discovery', null);
+    if (!zustand || zustand.day !== heute) {
+      zustand = { day: heute, searches: 0, cursor: zustand?.cursor || 0 };
+    }
+
+    const queries = settings.discoveryQueries;
+    const anzahl = Math.min(
+      Math.max(0, settings.discoverySearchesPerDay - zustand.searches),
+      queries.length,
+    );
+
+    if (anzahl > 0) {
+      onProgress({ phase: 'discovery', done: 0, total: anzahl });
+      const publishedAfter = new Date(Date.now() - settings.maxAgeDays * DAY_MS).toISOString();
+      const sprache = settings.languages?.[0] || 'de';
+      const blockiert = new Set(await db.kvGet('blockedChannels', []));
+      const bekannt = new Set(await db.allKeys('videos'));
+      const kandidaten = new Set();
+
+      for (let i = 0; i < anzahl; i++) {
+        if (signal?.aborted) break;
+        // Der Cursor wandert, damit über die Tage alle Themen drankommen und
+        // nicht immer nur die ersten sechs.
+        const q = queries[(zustand.cursor + i) % queries.length];
+        try {
+          const ids = await yt.searchVideos(q, settings.ytKey, { publishedAfter, language: sprache });
+          for (const id of ids) if (!bekannt.has(id)) kandidaten.add(id);
+        } catch (e) {
+          note(`Suche „${q}": ${e.message}`, 'error');
+          if (/quota/i.test(e.reason || '')) break;
+        }
+        zustand.searches += 1;
+        onProgress({ phase: 'discovery', done: i + 1, total: anzahl });
+      }
+      zustand.cursor = (zustand.cursor + anzahl) % queries.length;
+      await db.kvSet('discovery', zustand);
+
+      if (kandidaten.size) {
+        const details = await yt.fetchVideoDetails([...kandidaten], settings.ytKey);
+        const behalten = [];
+        const abonniert = new Set(await db.allKeys('channels'));
+        for (const v of details) {
+          if (blockiert.has(v.channelId)) continue;
+          // Kanäle, die du ohnehin abonniert hast, brauchen keinen
+          // „Entdeckt"-Umweg — ihre Uploads kommen über den normalen Weg.
+          if (abonniert.has(v.channelId)) continue;
+          if (new Date(v.publishedAt).getTime() < cutoff) continue;
+          // Die Suche liefert massenweise Shorts und es gibt hier keine
+          // Playlist, die sie schon aussortiert hätte — also über die Dauer.
+          v.isShort = isShort(v, settings, { useDuration: true });
+          if (v.isShort) continue;
+          v.source = 'discovery';
+          behalten.push(v);
+        }
+        await db.putMany('videos', behalten);
+        discovered = behalten.length;
+      }
+      note(`Entdecken: ${anzahl} Suchen, ${discovered} Videos zur Auswahl.`);
+    }
+  }
+
   // --- 3. Aufräumen ---
   const purgeBefore = Date.now() - settings.keepDays * DAY_MS;
   const alleKanalIds = new Set(await db.allKeys('channels'));
@@ -122,7 +187,8 @@ export async function run(onProgress = () => {}, signal = undefined) {
 
   // Videos entfernter Kanäle. Der Feed blendet sie ohnehin aus, aber liegen
   // lassen würde die Datenbank unnötig aufblähen.
-  const waisen = all.filter((v) => !alleKanalIds.has(v.channelId));
+  // Entdeckte Videos ausnehmen — deren Kanäle sind absichtlich nicht abonniert.
+  const waisen = all.filter((v) => v.source !== 'discovery' && !alleKanalIds.has(v.channelId));
   for (const v of waisen) await db.del('videos', v.id);
   if (waisen.length) note(`${waisen.length} Videos entfernter Kanäle aufgeräumt.`);
 
@@ -206,7 +272,7 @@ export async function run(onProgress = () => {}, signal = undefined) {
 
   const summary = {
     at: new Date().toISOString(),
-    added, scored, droppedOld, droppedShort,
+    added, scored, discovered, droppedOld, droppedShort,
     purged: stale.length,
     channels: channels.length,
     quota: await yt.getQuota(),
