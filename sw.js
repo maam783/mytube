@@ -3,7 +3,7 @@
 // Beim Ändern der App die Version hochzählen, sonst serviert das iPad die alte
 // Fassung weiter. In den Einstellungen gibt es dafür auch einen Update-Knopf.
 
-const VERSION = 'v5';
+const VERSION = 'v6';
 const CACHE = `mytube-${VERSION}`;
 
 const SHELL = [
@@ -61,14 +61,25 @@ self.addEventListener('fetch', (event) => {
     // damit die App im Flugzeug oder bei totem Hotel-WLAN trotzdem startet.
     fetch(revalidating)
       .then((response) => {
-        if (response && response.ok) {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, copy));
-        }
+        // Eine 404- oder 500-Antwort ist technisch erfolgreich, aber für die App
+        // wertlos. Ohne diese Prüfung würde bei einer GitHub-Störung die
+        // Fehlerseite durchgereicht, statt die gecachte App zu starten.
+        if (!response || !response.ok) throw new Error(`HTTP ${response?.status}`);
+        const copy = response.clone();
+        caches.open(CACHE).then((cache) => cache.put(request, copy));
         return response;
       })
-      .catch(() => caches.match(request).then((hit) => hit
-        || (request.mode === 'navigate' ? caches.match('./index.html') : undefined))),
+      .catch(async () => {
+        const treffer = await caches.match(request);
+        if (treffer) return treffer;
+        if (request.mode === 'navigate') {
+          const schale = await caches.match('./index.html');
+          if (schale) return schale;
+        }
+        // Lieber eine verständliche Meldung als eine kryptische Browser-Fehlerseite.
+        return new Response('MyTube ist offline und diese Datei liegt nicht im Zwischenspeicher.',
+          { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+      }),
   );
 });
 
