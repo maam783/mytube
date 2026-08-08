@@ -3,7 +3,7 @@
 // Beim Ändern der App die Version hochzählen, sonst serviert das iPad die alte
 // Fassung weiter. In den Einstellungen gibt es dafür auch einen Update-Knopf.
 
-const VERSION = 'v3';
+const VERSION = 'v4';
 const CACHE = `privatetube-${VERSION}`;
 
 const SHELL = [

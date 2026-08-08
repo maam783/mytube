@@ -427,10 +427,37 @@ async function viewChannels() {
   });
   const status = el('p', { class: 'hint' });
 
+  // Datei-Auswahl: greift auf dem iPad in „Dateien" und iCloud Drive. Damit
+  // brauchst du den Mac nicht — AirDrop die Abos.csv einmal aufs iPad, fertig.
+  const filePicker = el('input', {
+    type: 'file',
+    accept: '.csv,.txt,text/csv,text/plain',
+    style: 'display:none',
+  });
+  filePicker.addEventListener('change', async () => {
+    const file = filePicker.files?.[0];
+    if (!file) return;
+    try {
+      box.value = await file.text();
+      const treffer = new Set(box.value.match(/UC[\w-]{22}/g) || []).size;
+      status.textContent = treffer
+        ? `${file.name}: ${treffer} Kanäle erkannt — jetzt „Importieren" tippen.`
+        : `${file.name} enthält keine Kanal-IDs. Ist das wirklich die Abos.csv?`;
+    } catch (e) {
+      toast(`Datei konnte nicht gelesen werden: ${e.message}`, 'error');
+    }
+    filePicker.value = '';
+  });
+
   wrap.append(el('div', { class: 'card' },
     el('h2', { style: 'margin-top:0' }, 'Kanäle hinzufügen'),
     box,
-    el('div', { style: 'margin-top:10px' },
+    el('div', { class: 'row', style: 'margin-top:10px' },
+      el('button', {
+        class: 'btn',
+        onclick: () => filePicker.click(),
+      }, 'CSV-Datei wählen'),
+      filePicker,
       el('button', {
         class: 'btn primary',
         onclick: async (e) => {
@@ -447,8 +474,13 @@ async function viewChannels() {
       }, 'Importieren')),
     status,
     el('p', { class: 'hint' },
-      'Abo-Liste exportieren: takeout.google.com → nur „YouTube und YouTube Music" → ',
-      'nur „Abos" → die ', el('code', {}, 'subscriptions.csv'), ' hier einfügen.')));
+      'Zwei Wege: ', el('b', {}, 'CSV-Datei wählen'), ' greift auf „Dateien" und iCloud Drive — ',
+      'schick dir die ', el('code', {}, 'Abos.csv'), ' einmal per AirDrop aufs iPad. ',
+      'Oder den Inhalt oben ins Textfeld einsetzen.'),
+    el('p', { class: 'hint' },
+      'Die Datei bekommst du über takeout.google.com → alles abwählen → nur ',
+      '„YouTube und YouTube Music" → darin nur „Abos". Sie heißt ',
+      el('code', {}, 'Abos.csv'), ' (englisch: ', el('code', {}, 'subscriptions.csv'), ').')));
 
   // --- Liste ---
   for (const c of channels.sort((a, b) => a.title.localeCompare(b.title, 'de'))) {

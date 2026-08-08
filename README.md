@@ -74,7 +74,12 @@ Nach ein bis zwei Minuten liegt sie unter `https://DEINNAME.github.io/privatetub
    Home-Bildschirm-App teilen ihren Speicher nicht — was du in Safari
    einträgst, kennt die App nicht.
 4. In der App: **Einstellungen** → API-Key eintragen → speichern
-5. **Kanäle** → Inhalt der `Abos.csv` einfügen → *Importieren*
+5. **Kanäle** → `Abos.csv` laden → *Importieren*. Zwei Wege:
+   - **CSV-Datei wählen** — greift auf „Dateien" und iCloud Drive. Schick dir
+     die `Abos.csv` einmal per AirDrop aufs iPad, dann brauchst du den Mac nie
+     wieder dafür.
+   - **Einfügen** — auf dem Mac `pbcopy < Abos.csv`, dann per Universal
+     Clipboard direkt auf dem iPad ins Textfeld einsetzen.
 6. Oben rechts **Aktualisieren**
 
 ---

@@ -358,6 +358,14 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .chan .name small { color: var(--muted); font-size: 12px; }
 .chan.off { opacity: 0.45; }
 
+/* Auf schmalen Displays blieb vom Kanalnamen nur „2 Much Co…" übrig.
+   Knöpfe rutschen in die zweite Zeile, der Name bekommt die volle Breite. */
+@media (max-width: 560px) {
+  .chan { flex-wrap: wrap; }
+  .chan .name { flex-basis: calc(100% - 52px); }
+  .chan .btn { flex: 1; justify-content: center; }
+}
+
 /* ---------- Status ---------- */
 
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; }
