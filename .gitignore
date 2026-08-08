@@ -1,0 +1,9 @@
+# NIEMALS committen: enthält den API-Key und deine Abo-Liste.
+# GitHub Pages ist öffentlich — alles hier drin wäre für jeden lesbar.
+Google/
+*.key
+secrets*
+
+# lokal
+.DS_Store
+node_modules/

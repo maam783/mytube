@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="PrivateTube">
+  <rect width="512" height="512" rx="112" fill="#12141a"/>
+  <rect x="96" y="118" width="230" height="24" rx="12" fill="#2e3341"/>
+  <rect x="96" y="176" width="170" height="24" rx="12" fill="#2e3341"/>
+  <path d="M188 244 L188 400 L332 322 Z" fill="#6ea8fe"/>
+</svg>
