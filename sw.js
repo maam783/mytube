@@ -3,7 +3,7 @@
 // Beim Ändern der App die Version hochzählen, sonst serviert das iPad die alte
 // Fassung weiter. In den Einstellungen gibt es dafür auch einen Update-Knopf.
 
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = `privatetube-${VERSION}`;
 
 const SHELL = [
@@ -26,7 +26,10 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE)
       // Einzeln, damit eine fehlende Datei nicht die ganze Installation kippt.
-      .then((cache) => Promise.all(SHELL.map((url) => cache.add(url).catch(() => null))))
+      // `no-cache` auch hier — sonst installiert sich der neue Worker mit den
+      // alten Dateien aus dem HTTP-Cache.
+      .then((cache) => Promise.all(SHELL.map(
+        (url) => cache.add(new Request(url, { cache: 'no-cache' })).catch(() => null))))
       .then(() => self.skipWaiting()),
   );
 });
@@ -47,10 +50,16 @@ self.addEventListener('fetch', (event) => {
   // Fremde Hosts (googleapis, anthropic, youtube) gehen den Service Worker nichts an.
   if (url.origin !== self.location.origin) return;
 
+  // GitHub Pages liefert `Cache-Control: max-age=600`. Ohne `no-cache` würde
+  // der HTTP-Cache des Browsers dem Service Worker eine veraltete Datei geben,
+  // die dieser dann dauerhaft einfriert — ein Deploy käme nie an. `no-cache`
+  // erzwingt eine Rückfrage beim Server; unverändert kostet das nur ein 304.
+  const revalidating = new Request(request, { cache: 'no-cache' });
+
   event.respondWith(
     // Netz zuerst, damit ein Deploy sofort ankommt; Cache als Rückfallebene,
     // damit die App im Flugzeug oder bei totem Hotel-WLAN trotzdem startet.
-    fetch(request)
+    fetch(revalidating)
       .then((response) => {
         if (response && response.ok) {
           const copy = response.clone();
