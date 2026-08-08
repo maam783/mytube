@@ -65,7 +65,17 @@ export async function getSpend() {
   return s;
 }
 
+// Läufe können parallel sein; Lesen-Ändern-Schreiben auf demselben Datensatz
+// muss trotzdem nacheinander passieren, sonst gehen Kosten verloren.
+let spendLock = Promise.resolve();
+
 async function addSpend(usage) {
+  const run = spendLock.then(() => addSpendUnsafe(usage), () => addSpendUnsafe(usage));
+  spendLock = run.catch(() => {});
+  return run;
+}
+
+async function addSpendUnsafe(usage) {
   const s = await getSpend();
   const inTok = (usage?.input_tokens || 0) + (usage?.cache_read_input_tokens || 0)
     + (usage?.cache_creation_input_tokens || 0);
@@ -82,8 +92,11 @@ function client(apiKey) {
   return new Anthropic({
     apiKey,
     dangerouslyAllowBrowser: true,
-    maxRetries: 3,
-    timeout: 90_000,
+    // Bewusst knapp: 3 Versuche à 60 s begrenzen eine hängende Anfrage auf drei
+    // Minuten. Mit den vorherigen Werten (4 × 90 s) konnte ein einziger Batch
+    // sechs Minuten blockieren, ohne dass irgendetwas kaputt war.
+    maxRetries: 2,
+    timeout: 60_000,
   });
 }
 
@@ -116,7 +129,7 @@ function examplesBlock(examples) {
  * Bewertet einen Batch Videos. Wirft BudgetExceeded, bevor Kosten entstehen.
  * Gibt { results, usage, spend } zurück; results ist nach video_id gemappt.
  */
-export async function scoreBatch(videos, { apiKey, model, manifest, examples = [], budgetUsd }) {
+export async function scoreBatch(videos, { apiKey, model, manifest, examples = [], budgetUsd, signal }) {
   if (!videos.length) return { results: new Map(), spend: await getSpend() };
 
   const spendBefore = await getSpend();
@@ -136,7 +149,7 @@ export async function scoreBatch(videos, { apiKey, model, manifest, examples = [
     system: SYSTEM,
     messages: [{ role: 'user', content: prompt }],
     output_config: { format: { type: 'json_schema', schema: SCORE_SCHEMA } },
-  });
+  }, { signal });
 
   const spend = await addSpend(res.usage);
 

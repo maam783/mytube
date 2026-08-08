@@ -97,6 +97,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
   cursor: pointer;
 }
 .sync-btn:disabled { opacity: 0.5; }
+/* Während des Laufs wird derselbe Knopf zum Abbrechen. */
+.sync-btn.busy { background: var(--surface-2); color: var(--text); }
 
 /* Auf schmalen Displays drängt der Sync-Knopf die Tabs sonst aus dem Bild —
    „Einstellungen" war dann gar nicht mehr erreichbar. Tabs auf eigene Zeile. */

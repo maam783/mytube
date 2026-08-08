@@ -65,6 +65,7 @@ let syncing = false;
 // gespeicherte Eingaben übernimmt. Sonst liest „Aktualisieren" die alten Werte
 // und verlangt einen Key, den du gerade eingetippt hast.
 let flushPendingSettings = null;
+let syncAbort = null;
 
 async function loadContext() {
   const [settings, videos, channels] = await Promise.all([
@@ -91,7 +92,13 @@ async function updateVideo(id, patch) {
 // ---------- Sync ----------
 
 async function runSync() {
-  if (syncing) return;
+  // Zweiter Tipp auf den laufenden Knopf bricht ab. Die Bewertung kann Minuten
+  // dauern; ohne Ausweg wäre man ihr ausgeliefert.
+  if (syncing) {
+    syncAbort?.abort();
+    toast('Wird abgebrochen…');
+    return;
+  }
 
   // Erst übernehmen, was in einem offenen Formular steht — sonst startet der
   // Lauf mit veralteten Werten.
@@ -105,12 +112,13 @@ async function runSync() {
   }
 
   syncing = true;
+  syncAbort = new AbortController();
   const btn = document.getElementById('sync-btn');
   const bar = document.getElementById('progress');
   const fill = document.getElementById('progress-fill');
   const text = document.getElementById('progress-text');
-  btn.disabled = true;
-  btn.textContent = 'Lädt…';
+  btn.textContent = 'Abbrechen';
+  btn.classList.add('busy');
   bar.hidden = false;
   fill.style.width = '0%';
   text.textContent = 'Start…';
@@ -123,22 +131,33 @@ async function runSync() {
         if (ev.level === 'error') toast(ev.message, 'error');
         return;
       }
+      // Videos sind vollständig — anzeigen, ohne auf die Bewertung zu warten.
+      if (ev.phase === 'ingested') { render(); return; }
       if (ev.phase === 'done') return;
       const pct = ev.total ? Math.round((ev.done / ev.total) * 100) : 0;
       fill.style.width = `${pct}%`;
-      text.textContent = `${labels[ev.phase] || ev.phase} ${ev.done}/${ev.total}`;
-    });
-    const errs = summary.log.filter((l) => l.level === 'error').length;
-    toast(`${summary.added} neue Videos`
-      + (summary.scored ? `, ${summary.scored} bewertet` : '')
-      + (errs ? ` · ${errs} Fehler (siehe Status)` : ''),
-      errs ? 'warn' : 'info');
+      text.textContent = ev.phase === 'scoring'
+        ? `Bewertung ${ev.done}/${ev.total} — der Feed ist schon nutzbar`
+        : `${labels[ev.phase] || ev.phase} ${ev.done}/${ev.total}`;
+    }, syncAbort.signal);
+
+    if (syncAbort.signal.aborted) {
+      toast(`Abgebrochen. ${summary.added} Videos geladen`
+        + (summary.scored ? `, ${summary.scored} bewertet` : '') + '.', 'warn');
+    } else {
+      const errs = summary.log.filter((l) => l.level === 'error').length;
+      toast(`${summary.added} neue Videos`
+        + (summary.scored ? `, ${summary.scored} bewertet` : '')
+        + (errs ? ` · ${errs} Fehler (siehe Status)` : ''),
+        errs ? 'warn' : 'info');
+    }
   } catch (e) {
-    toast(e.message, 'error', 8000);
+    if (!syncAbort.signal.aborted) toast(e.message, 'error', 8000);
   } finally {
     syncing = false;
-    btn.disabled = false;
+    syncAbort = null;
     btn.textContent = 'Aktualisieren';
+    btn.classList.remove('busy');
     bar.hidden = true;
     render();
   }
@@ -182,6 +201,36 @@ async function viewFeed() {
   return wrap;
 }
 
+/**
+ * Daumen-Knopf.
+ *
+ * Wichtig: `event.currentTarget` wird vom Browser auf `null` gesetzt, sobald
+ * die Ereignisbehandlung zurückkehrt — also beim ersten `await`. Wer es danach
+ * liest, bekommt einen TypeError, und alles was folgt (auch die Rückmeldung an
+ * dich) läuft nie. Deshalb das Element vorher festhalten und die Markierung
+ * sofort setzen; das Schreiben in die Datenbank passiert danach.
+ */
+function thumbButton(video, value, label, title) {
+  const btn = el('button', {
+    class: 'btn icon', title,
+    onclick: async () => {
+      const good = value > 0;
+      btn.classList.toggle('on-good', good);
+      btn.classList.toggle('on-bad', !good);
+      const gegenstueck = btn.parentElement?.querySelector(good ? '.on-bad' : '.on-good');
+      if (gegenstueck && gegenstueck !== btn) gegenstueck.classList.remove('on-good', 'on-bad');
+      try {
+        await recordFeedback(video.id, 'thumb', value);
+        toast(good ? 'Notiert: mehr davon.' : 'Notiert: weniger davon.');
+      } catch (e) {
+        btn.classList.remove('on-good', 'on-bad');
+        toast(`Bewertung konnte nicht gespeichert werden: ${e.message}`, 'error');
+      }
+    },
+  }, label);
+  return btn;
+}
+
 function feedItem(v, exploration) {
   const open = () => { location.hash = `#/v/${v.id}`; };
 
@@ -204,22 +253,8 @@ function feedItem(v, exploration) {
       badges.children.length ? badges : null,
       v.reason ? el('p', { class: 'reason' }, v.reason) : null,
       el('div', { class: 'actions' },
-        el('button', {
-          class: 'btn icon', title: 'Mehr davon',
-          onclick: async (e) => {
-            await recordFeedback(v.id, 'thumb', 1);
-            e.currentTarget.classList.add('on-good');
-            toast('Notiert: mehr davon.');
-          },
-        }, '👍'),
-        el('button', {
-          class: 'btn icon', title: 'Weniger davon',
-          onclick: async (e) => {
-            await recordFeedback(v.id, 'thumb', -1);
-            e.currentTarget.classList.add('on-bad');
-            toast('Notiert: weniger davon.');
-          },
-        }, '👎'),
+        thumbButton(v, 1, '👍', 'Mehr davon'),
+        thumbButton(v, -1, '👎', 'Weniger davon'),
         el('a', {
           class: 'btn', href: watchUrl(v.id), target: '_blank', rel: 'noopener',
         }, 'In YouTube'),
@@ -285,21 +320,30 @@ async function viewVideo(id) {
     toast('Als gesehen markiert.');
   };
 
+  // Gleiche Falle wie im Feed: das Element vor dem ersten `await` festhalten.
+  const rate = (value, label) => {
+    const btn = el('button', {
+      class: 'btn',
+      onclick: async () => {
+        const good = value > 0;
+        btn.classList.toggle('on-good', good);
+        btn.classList.toggle('on-bad', !good);
+        try {
+          await recordFeedback(v.id, 'thumb', value);
+          await updateVideo(v.id, { watched: true });
+          toast(good ? 'Notiert: mehr davon.' : 'Notiert: weniger davon.');
+        } catch (e) {
+          btn.classList.remove('on-good', 'on-bad');
+          toast(`Bewertung konnte nicht gespeichert werden: ${e.message}`, 'error');
+        }
+      },
+    }, label);
+    return btn;
+  };
+
   wrap.append(el('div', { class: 'video-actions' },
-    el('button', {
-      class: 'btn', onclick: async (e) => {
-        await recordFeedback(v.id, 'thumb', 1);
-        await markWatched();
-        e.currentTarget.classList.add('on-good');
-      },
-    }, '👍 Gut'),
-    el('button', {
-      class: 'btn', onclick: async (e) => {
-        await recordFeedback(v.id, 'thumb', -1);
-        await markWatched();
-        e.currentTarget.classList.add('on-bad');
-      },
-    }, '👎 Nicht gut'),
+    rate(1, '👍 Gut'),
+    rate(-1, '👎 Nicht gut'),
     el('a', {
       class: 'btn primary', href: watchUrl(v.id), target: '_blank', rel: 'noopener',
       onclick: () => armReturnPrompt(v),
@@ -498,8 +542,16 @@ async function viewChannels() {
       el('button', {
         class: 'btn danger',
         onclick: async () => {
-          if (!confirm(`„${c.title}" wirklich entfernen?`)) return;
+          const eigene = videos.filter((x) => x.channelId === c.id);
+          const frage = eigene.length
+            ? `„${c.title}" entfernen? Die ${eigene.length} Videos dieses Kanals werden mit gelöscht.`
+            : `„${c.title}" wirklich entfernen?`;
+          if (!confirm(frage)) return;
+          // Videos mit löschen — sonst bleiben sie als Waisen in der Datenbank
+          // liegen und belegen Platz, auch wenn der Feed sie ausblendet.
+          for (const x of eigene) await db.del('videos', x.id);
           await db.del('channels', c.id);
+          toast(`„${c.title}" entfernt${eigene.length ? ` samt ${eigene.length} Videos` : ''}.`);
           render();
         },
       }, 'Entfernen')));
@@ -764,7 +816,7 @@ async function doExport() {
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = el('a', {
     href: URL.createObjectURL(blob),
-    download: `privatetube-${new Date().toISOString().slice(0, 10)}.json`,
+    download: `mytube-${new Date().toISOString().slice(0, 10)}.json`,
   });
   document.body.append(a);
   a.click();

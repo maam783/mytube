@@ -32,7 +32,10 @@ export function stage0Reject(video, settings, channelsById, now = Date.now()) {
   if (video.watched) return 'gesehen';
 
   const channel = channelsById.get(video.channelId);
-  if (channel && channel.active === false) return 'Kanal stummgeschaltet';
+  // Kein Kanaleintrag = Kanal wurde entfernt. Ohne diese Zeile blieben seine
+  // Videos für immer im Feed, weil die Stumm-Prüfung darunter ins Leere lief.
+  if (!channel) return 'Kanal entfernt';
+  if (channel.active === false) return 'Kanal stummgeschaltet';
 
   const age = ageDays(video, now);
   if (age > settings.maxAgeDays) return `älter als ${settings.maxAgeDays} Tage`;

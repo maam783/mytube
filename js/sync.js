@@ -26,8 +26,10 @@ async function mapLimit(items, limit, fn) {
 
 /**
  * @param {(ev: {phase:string, done?:number, total?:number, message?:string, level?:string}) => void} onProgress
+ * @param {AbortSignal} [signal] Bricht den Lauf ab — vor allem die Bewertung,
+ *   die je nach Anzahl der Videos Minuten dauern kann.
  */
-export async function run(onProgress = () => {}) {
+export async function run(onProgress = () => {}, signal = undefined) {
   const log = [];
   const note = (message, level = 'info') => {
     log.push({ at: new Date().toISOString(), level, message });
@@ -111,10 +113,22 @@ export async function run(onProgress = () => {}) {
 
   // --- 3. Aufräumen ---
   const purgeBefore = Date.now() - settings.keepDays * DAY_MS;
+  const alleKanalIds = new Set(await db.allKeys('channels'));
   const all = await db.getAll('videos');
+
   const stale = all.filter((v) => new Date(v.publishedAt).getTime() < purgeBefore);
   for (const v of stale) await db.del('videos', v.id);
   if (stale.length) note(`${stale.length} alte Videos aus der Datenbank entfernt.`);
+
+  // Videos entfernter Kanäle. Der Feed blendet sie ohnehin aus, aber liegen
+  // lassen würde die Datenbank unnötig aufblähen.
+  const waisen = all.filter((v) => !alleKanalIds.has(v.channelId));
+  for (const v of waisen) await db.del('videos', v.id);
+  if (waisen.length) note(`${waisen.length} Videos entfernter Kanäle aufgeräumt.`);
+
+  // Ab hier ist der Feed vollständig. Die Bewertung darunter kann Minuten
+  // dauern — die Videos sollen aber jetzt schon sichtbar sein.
+  onProgress({ phase: 'ingested' });
 
   // --- 4. KI-Bewertung (optional) ---
   let scored = 0;
@@ -129,10 +143,20 @@ export async function run(onProgress = () => {}) {
       .filter((v) => channelsById.get(v.channelId)?.active !== false)
       .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
 
+    const batches = [];
+    for (let i = 0; i < pending.length; i += settings.batchSize) {
+      batches.push(pending.slice(i, i + settings.batchSize));
+    }
+
+    let erledigt = 0;
+    let fehler = 0;
+    let stopp = false;
     onProgress({ phase: 'scoring', done: 0, total: pending.length });
 
-    for (let i = 0; i < pending.length; i += settings.batchSize) {
-      const batch = pending.slice(i, i + settings.batchSize);
+    // Drei Anfragen gleichzeitig. Nacheinander dauerte das bei ~190 Videos gut
+    // fünf Minuten — jede Anfrage muss 25 Begründungen schreiben.
+    await mapLimit(batches, 3, async (batch) => {
+      if (stopp || signal?.aborted) return;
       try {
         const { results } = await ai.scoreBatch(batch, {
           apiKey: settings.anthropicKey,
@@ -140,6 +164,7 @@ export async function run(onProgress = () => {}) {
           manifest,
           examples,
           budgetUsd: settings.dailyBudgetUsd,
+          signal,
         });
         const updates = [];
         for (const v of batch) {
@@ -155,20 +180,28 @@ export async function run(onProgress = () => {}) {
         }
         await db.putMany('videos', updates);
         scored += updates.length;
-        if (updates.length < batch.length) {
-          note(`${batch.length - updates.length} Videos ohne Ergebnis — kommen beim nächsten Lauf erneut dran.`, 'warn');
-        }
       } catch (e) {
         if (e instanceof ai.BudgetExceeded) {
-          note(`${e.message} Bewertung pausiert, der Feed läuft chronologisch weiter.`, 'warn');
-          break;
+          if (!stopp) note(`${e.message} Bewertung pausiert, der Feed läuft chronologisch weiter.`, 'warn');
+          stopp = true;
+        } else if (signal?.aborted) {
+          stopp = true;
+        } else {
+          // Ein Aussetzer ist kein Grund aufzuhören; ein dauerhafter schon.
+          note(`Bewertung fehlgeschlagen: ${e.message}`, ++fehler >= 2 ? 'error' : 'warn');
+          if (fehler >= 2) stopp = true;
         }
-        note(`Bewertung fehlgeschlagen: ${e.message}`, 'error');
-        break; // Rest bleibt score=null und wird beim nächsten Lauf nachgeholt
+      } finally {
+        erledigt += batch.length;
+        onProgress({ phase: 'scoring', done: Math.min(erledigt, pending.length), total: pending.length });
       }
-      onProgress({ phase: 'scoring', done: Math.min(i + settings.batchSize, pending.length), total: pending.length });
-    }
+    });
+
     if (scored) note(`${scored} Videos bewertet.`);
+    const offen = pending.length - scored;
+    if (offen > 0 && !signal?.aborted) {
+      note(`${offen} Videos noch ohne Bewertung — kommen beim nächsten Lauf dran.`, 'warn');
+    }
   }
 
   const summary = {

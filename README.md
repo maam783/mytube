@@ -1,4 +1,4 @@
-# PrivateTube
+# MyTube
 
 Ein privater YouTube-Feed für das iPad. Keine Shorts, nichts älter als N Tage,
 kein Empfehlungsalgorithmus.
@@ -56,11 +56,11 @@ exportieren. Du bekommst eine `Abos.csv` mit Kanal-IDs.
 Die App ist eine statische Seite. GitHub Pages reicht:
 
 ```bash
-gh repo create privatetube --public --source=. --push
-gh api -X POST repos/:owner/privatetube/pages -f 'source[branch]=main' -f 'source[path]=/'
+gh repo create mytube --public --source=. --push
+gh api -X POST repos/:owner/mytube/pages -f 'source[branch]=main' -f 'source[path]=/'
 ```
 
-Nach ein bis zwei Minuten liegt sie unter `https://DEINNAME.github.io/privatetube/`.
+Nach ein bis zwei Minuten liegt sie unter `https://DEINNAME.github.io/mytube/`.
 
 > Im Repository stehen **keine Geheimnisse**. Der API-Key und deine Abo-Liste
 > liegen unter `Google/` und sind per `.gitignore` ausgeschlossen. Prüfe vor dem

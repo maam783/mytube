@@ -1,6 +1,6 @@
 {
-  "name": "PrivateTube",
-  "short_name": "PrivateTube",
+  "name": "MyTube",
+  "short_name": "MyTube",
   "description": "Ein privater YouTube-Feed ohne Shorts und ohne alte Videos.",
   "start_url": "./index.html",
   "scope": "./",

@@ -1,5 +1,9 @@
 // IndexedDB-Schicht. Alles liegt lokal auf dem iPad — es gibt keinen Server.
 
+// Der Datenbankname bleibt absichtlich 'privatetube', obwohl die App jetzt
+// MyTube heißt. IndexedDB kennt kein Umbenennen: Ein neuer Name wäre eine neue,
+// leere Datenbank — deine Kanäle, Einstellungen und Bewertungen blieben in der
+// alten liegen. Der Name ist nirgends sichtbar; das Risiko lohnt nicht.
 const DB_NAME = 'privatetube';
 const DB_VERSION = 1;
 
@@ -103,7 +107,7 @@ export async function exportAll() {
     getAll('videos'), getAll('channels'), getAll('feedback'), getAll('kv'),
   ]);
   return {
-    format: 'privatetube-backup',
+    format: 'mytube-backup',
     version: 1,
     exportedAt: new Date().toISOString(),
     videos, channels, feedback, kv,
@@ -111,8 +115,10 @@ export async function exportAll() {
 }
 
 export async function importAll(data, { replace = false } = {}) {
-  if (!data || data.format !== 'privatetube-backup') {
-    throw new Error('Keine gültige PrivateTube-Sicherung.');
+  // Sicherungen aus der Zeit vor der Umbenennung müssen weiter funktionieren.
+  const bekannt = ['mytube-backup', 'privatetube-backup'];
+  if (!data || !bekannt.includes(data.format)) {
+    throw new Error('Keine gültige MyTube-Sicherung.');
   }
   if (replace) {
     await Promise.all([clear('videos'), clear('channels'), clear('feedback'), clear('kv')]);
@@ -120,7 +126,16 @@ export async function importAll(data, { replace = false } = {}) {
   await putMany('channels', data.channels || []);
   await putMany('videos', data.videos || []);
   await putMany('kv', data.kv || []);
-  // Feedback hat autoIncrement-Keys; beim Zusammenführen neu vergeben.
-  const fb = (data.feedback || []).map((f) => (replace ? f : { ...f, id: undefined }));
+  // Feedback hat autoIncrement-Schlüssel; beim Zusammenführen neu vergeben.
+  //
+  // Achtung: Die `id` muss dafür GANZ FEHLEN. `{ ...f, id: undefined }` sieht
+  // richtig aus, ist aber falsch — IndexedDB findet die Eigenschaft vor, hält
+  // `undefined` für einen ungültigen Schlüssel und bricht den ganzen Import ab.
+  const fb = (data.feedback || []).map((f) => {
+    if (replace) return f;
+    const { id, ...ohneId } = f;
+    void id;
+    return ohneId;
+  });
   await putMany('feedback', fb);
 }
