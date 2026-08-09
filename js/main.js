@@ -385,6 +385,8 @@ const pointAnchor = (x, y) => ({
 const SWIPE = { COMMIT: 96, SLOP: 8, AXIS: 1.2, DAMP: 0.4, EDGE: 28, FLICK: 0.5, FLICK_MIN: 32 };
 
 function attachSwipe(wrap, row, { onCommit, onLongPress }) {
+  let active = false; // nur zwischen pointerdown und pointerup verfolgen —
+  // sonst „wischt" die Maus schon beim Drüberfahren ohne Klick
   let axis = null;
   let startX = 0; let startY = 0; let dx = 0;
   let lastX = 0; let lastT = 0; let vel = 0;
@@ -402,19 +404,24 @@ function attachSwipe(wrap, row, { onCommit, onLongPress }) {
     // 28px Totzone am linken Rand: dort wohnt der iOS-Zurück-Wisch.
     if (!e.isPrimary || e.clientX < SWIPE.EDGE) return;
     if (e.target.closest('button, a, .btn')) return;
+    // Maus: nur die Primärtaste startet eine Geste.
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    active = true;
     axis = null; dx = 0; swiped = false;
     startX = e.clientX; startY = e.clientY;
     lastX = e.clientX; lastT = e.timeStamp; vel = 0;
     row.style.transition = '';
     clearTimeout(lpTimer);
     lpTimer = setTimeout(() => {
-      if (axis === null) { swiped = true; onLongPress(startX, startY); }
+      if (active && axis === null) { swiped = true; onLongPress(startX, startY); }
     }, 450);
     try { row.setPointerCapture(e.pointerId); } catch { /* egal */ }
   });
 
   row.addEventListener('pointermove', (e) => {
-    if (!e.isPrimary) return;
+    if (!active || !e.isPrimary) return;
+    // Maus ohne gedrückte Taste: keine Geste (passiert nach verpasstem pointerup).
+    if (e.pointerType === 'mouse' && !(e.buttons & 1)) { active = false; return; }
     const mx = e.clientX - startX;
     const my = e.clientY - startY;
     if (axis === null) {
@@ -435,6 +442,7 @@ function attachSwipe(wrap, row, { onCommit, onLongPress }) {
 
   const finish = (e) => {
     clearTimeout(lpTimer);
+    active = false;
     if (axis !== 'h') { axis = null; return; }
     swiped = true;
     const commit = dx >= SWIPE.COMMIT || (vel > SWIPE.FLICK && dx > SWIPE.FLICK_MIN);
@@ -453,7 +461,7 @@ function attachSwipe(wrap, row, { onCommit, onLongPress }) {
     void e;
   };
   row.addEventListener('pointerup', finish);
-  row.addEventListener('pointercancel', (e) => { clearTimeout(lpTimer); if (axis === 'h') resetVisual(); axis = null; void e; });
+  row.addEventListener('pointercancel', (e) => { clearTimeout(lpTimer); active = false; if (axis === 'h') resetVisual(); axis = null; void e; });
 
   // Nach einer erkannten Geste den folgenden Click schlucken.
   row.addEventListener('click', (e) => {
@@ -487,7 +495,7 @@ function makeTappable(node, v) {
 }
 
 function thumbShell(v, { rounded = '10px' } = {}) {
-  return el('div', { class: 'tshell', style: `border-radius:${rounded}` },
+  return el('div', { class: 'tshell', style: rounded ? `border-radius:${rounded}` : '' },
     v.thumb ? el('img', { src: v.thumb, alt: '', loading: 'lazy', decoding: 'async' }) : null,
     el('span', { class: 'dur' }, fmtDuration(v.durationSec)),
     (!v.embeddable || v.embedFailed || v.ageRestricted)
@@ -550,7 +558,6 @@ async function viewFeed() {
   const rest = ordered.slice(1);
   const discoveries = rest.filter((o) => o.video.source === 'discovery');
   const stream = rest.filter((o) => o.video.source !== 'discovery');
-  const cardSet = new Set(isWide ? stream.slice(0, 4).map((o) => o.video.id) : []);
 
   setFeedCount(ordered.length);
   wrap.append(el('header', { class: 'masthead' },
@@ -663,17 +670,50 @@ async function viewFeed() {
       });
   };
 
+  /**
+   * „Weg damit" ohne jede Wertung. Der Unterschied zu „Weniger davon":
+   * Ein Autotest-Kanal ist gut, nur DIESES Modell interessiert nicht —
+   * das darf weder den Kanal noch das Thema abwerten. Setzt nur dismissed,
+   * schreibt kein Feedback.
+   */
+  const hideSingle = async (v, wrapEl) => {
+    await updateVideo(v.id, { dismissed: true });
+    const slot = rememberSlot(wrapEl);
+    collapseRemove(wrapEl);
+    bumpFeedCount(-1);
+    showUndo('Ausgeblendet — ohne Wertung', async () => {
+      await updateVideo(v.id, { dismissed: false });
+      restoreSlot(slot);
+      bumpFeedCount(1);
+    });
+  };
+
+  /** Für später parken: raus aus dem Feed, rein in die Merkliste. */
+  const saveForLater = async (v, wrapEl) => {
+    await updateVideo(v.id, { saved: true, savedAt: new Date().toISOString() });
+    const slot = rememberSlot(wrapEl);
+    collapseRemove(wrapEl);
+    bumpFeedCount(-1);
+    showUndo('Gemerkt — liegt in der Merkliste', async () => {
+      await updateVideo(v.id, { saved: false, savedAt: null });
+      restoreSlot(slot);
+      bumpFeedCount(1);
+    });
+  };
+
   const menuFor = (v, wrapEl, idx, { discovery = false } = {}) => async (anchor) => {
     const cur = await db.get('videos', v.id) || v;
     openMenu(anchor, [
+      { icon: '🔖', label: 'Merken — später ansehen', onTap: () => saveForLater(v, wrapEl) },
       { icon: '👍', label: 'Mehr davon', checked: cur.rating === 1, onTap: () => toggleLike(v) },
       { icon: '👎', label: 'Weniger davon — und ausblenden', onTap: () => dislikeSingle(v, wrapEl) },
+      { icon: '✕', label: 'Ausblenden — ohne Wertung', onTap: () => hideSingle(v, wrapEl) },
       { icon: '↗', label: 'In YouTube öffnen', onTap: () => { armReturnPrompt(v); window.open(watchUrl(v.id), '_blank', 'noopener'); } },
       idx != null ? { icon: '✓', label: `Ab hier alle als gesehen (${remainingFrom(idx)})`, onTap: () => markFromHere(idx) } : null,
       discovery ? { sep: true } : null,
       discovery ? { icon: '✓', label: 'Gesehen', onTap: () => seenSingle(v, wrapEl) } : null,
       discovery ? { icon: '+', label: 'Kanal abonnieren', onTap: () => subscribeChannel(v) } : null,
-      discovery ? { icon: '✕', label: 'Nie wieder vorschlagen', danger: true, onTap: () => blockDiscovery(v) } : null,
+      discovery ? { icon: '🚫', label: 'Nie wieder vorschlagen', danger: true, onTap: () => blockDiscovery(v) } : null,
       v.score != null ? { inert: true, label: `Score: ${v.score}` } : null,
     ]);
   };
@@ -719,7 +759,7 @@ async function viewFeed() {
       v.reason ? el('p', { class: 'reason hero-reason' }, v.reason) : null);
     const card = el('article', {
       class: 'card hero', dataset: { id: v.id, idx: String(idx), channelId: v.channelId },
-    }, thumbShell(v, { rounded: '18px 18px 0 0' }), body);
+    }, thumbShell(v, { rounded: '' }), body); // Rundung regelt das CSS je Breite
     // Erst jetzt, denn die Aktionszeile braucht eine Referenz auf die Karte.
     body.append(actionRow(v, card, idx, { discovery: v.source === 'discovery' }));
     makeTappable(card, v);
@@ -801,6 +841,14 @@ async function viewFeed() {
     buckets.get(b).push(o);
   }
 
+  // Karten gibt es nur ganz oben: die ersten vier Videos der OBERSTEN Sektion.
+  // Danach einheitliche Zeilen. Vorher wurden die global Top-4 in ihre
+  // jeweilige Datums-Sektion einsortiert — im KI-Modus streuten sie über die
+  // Tage, und mitten im Feed tauchten scheinbar willkürlich große Karten auf.
+  // Jetzt ist es ein Gefälle: Aufmacher → Karten → Zeilen, einmal, von oben.
+  const firstBucket = buckets.values().next().value || [];
+  const cardSet = new Set(isWide ? firstBucket.slice(0, 4).map((o) => o.video.id) : []);
+
   const discoverBlock = () => {
     if (!discoveries.length) return null;
     const useScroller = discoveries.length >= 3;
@@ -863,6 +911,67 @@ async function viewFeed() {
     });
   }
 
+  return wrap;
+}
+
+// ---------- Merkliste ----------
+
+async function viewSaved() {
+  const videos = (await db.getAll('videos'))
+    .filter((v) => v.saved)
+    .sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || ''));
+
+  const wrap = el('div', { class: 'paper' });
+  wrap.append(el('header', { class: 'masthead' },
+    el('div', { class: 'overline' }, `Merkliste · ${videos.length}`),
+    el('h1', { class: 'masthead-date' }, 'Später ansehen')));
+
+  if (!videos.length) {
+    wrap.append(el('div', { class: 'empty' },
+      el('strong', {}, 'Nichts gemerkt'),
+      el('p', {}, 'Im Feed: ···-Menü → „Merken — später ansehen". Gemerkte Videos überleben auch das Aufräumen alter Videos.')));
+    return wrap;
+  }
+
+  for (const v of videos) {
+    const bylineParts = [v.channelTitle, fmtAge(v.publishedAt)];
+    if (!v.liveStatus) bylineParts.push(fmtMins(v.durationSec));
+    const row = el('div', { class: 'row-item saved-item', dataset: { id: v.id } },
+      thumbShell(v),
+      el('div', { class: 'row-body' },
+        el('h3', { class: 'row-title' }, v.title),
+        el('div', { class: 'byline' }, bylineParts.join(' · ')),
+        v.reason ? el('p', { class: 'reason' }, v.reason) : null,
+        el('div', { class: 'actionrow' },
+          el('button', {
+            class: 'btn',
+            onclick: async () => {
+              // Gesehen = erledigt: raus aus der Merkliste, zählt als geschaut.
+              await updateVideo(v.id, { watched: true, saved: false, savedAt: null });
+              const slot = rememberSlot(row);
+              collapseRemove(row);
+              showUndo(`Gesehen · „${v.title.slice(0, 30)}…"`, async () => {
+                await updateVideo(v.id, { watched: false, saved: true, savedAt: v.savedAt });
+                restoreSlot(slot);
+              });
+            },
+          }, 'Gesehen'),
+          el('button', {
+            class: 'btn ghost',
+            onclick: async () => {
+              // Zurück in den Feed (sofern noch im Altersfenster).
+              await updateVideo(v.id, { saved: false, savedAt: null });
+              const slot = rememberSlot(row);
+              collapseRemove(row);
+              showUndo('Aus der Merkliste entfernt', async () => {
+                await updateVideo(v.id, { saved: true, savedAt: v.savedAt });
+                restoreSlot(slot);
+              });
+            },
+          }, 'Entfernen'))));
+    makeTappable(row, v);
+    wrap.append(row);
+  }
   return wrap;
 }
 
@@ -945,6 +1054,15 @@ async function viewVideo(id) {
       onclick: () => armReturnPrompt(v),
     }, 'In YouTube öffnen'),
     el('button', { class: 'btn ghost', onclick: markWatched }, 'Gesehen'),
+    el('button', {
+      class: 'btn ghost',
+      onclick: async () => {
+        const cur = await db.get('videos', v.id);
+        const jetzt = !cur?.saved;
+        await updateVideo(v.id, { saved: jetzt, savedAt: jetzt ? new Date().toISOString() : null });
+        toast(jetzt ? 'Gemerkt — liegt in der Merkliste.' : 'Aus der Merkliste entfernt.');
+      },
+    }, '🔖 Merken'),
     el('button', {
       class: 'btn ghost',
       onclick: async () => {
@@ -1575,6 +1693,7 @@ function viewWelcome() {
 
 const routes = [
   [/^#\/?$/, viewFeed],
+  [/^#\/saved$/, viewSaved],
   [/^#\/v\/([\w-]+)$/, viewVideo],
   [/^#\/channels$/, viewChannels],
   [/^#\/manifest$/, viewManifest],

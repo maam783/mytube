@@ -286,6 +286,28 @@ h2 { font-size: 17px; margin: 28px 0 10px; }
 /* Hero + Karten */
 .card.hero, .card.sec, .card.disc { padding: 0; overflow: hidden; cursor: pointer; }
 .card.hero { border-radius: 18px; margin-bottom: 24px; box-shadow: var(--shadow-card); }
+.card.hero .tshell { border-radius: 18px 18px 0 0; }
+
+/* Auf dem iPad füllte der Aufmacher als voller Querbalken fast die ganze
+   Seite — jetzt Bild links, Text rechts, zusammen etwa halbe Seitenhöhe. */
+@media (min-width: 720px) {
+  .card.hero {
+    display: grid;
+    grid-template-columns: minmax(0, 46%) 1fr;
+    align-items: stretch;
+  }
+  .card.hero .tshell {
+    border-radius: 18px 0 0 18px;
+    height: 100%;
+    aspect-ratio: auto;
+    min-height: 240px;
+  }
+  .card.hero .card-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+}
 .card.sec  { border-radius: 16px; margin: 0; box-shadow: var(--shadow-card); }
 .card.hero:active, .card.sec:active, .card.disc:active { transform: scale(.985); transition: transform .12s ease; }
 

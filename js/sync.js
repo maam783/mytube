@@ -181,14 +181,16 @@ export async function run(onProgress = () => {}, signal = undefined) {
   const alleKanalIds = new Set(await db.allKeys('channels'));
   const all = await db.getAll('videos');
 
-  const stale = all.filter((v) => new Date(v.publishedAt).getTime() < purgeBefore);
+  // Gemerkte Videos überleben jedes Aufräumen — die Merkliste ist genau für
+  // „später ansehen" da, und später kann nach keepDays liegen.
+  const stale = all.filter((v) => !v.saved && new Date(v.publishedAt).getTime() < purgeBefore);
   for (const v of stale) await db.del('videos', v.id);
   if (stale.length) note(`${stale.length} alte Videos aus der Datenbank entfernt.`);
 
   // Videos entfernter Kanäle. Der Feed blendet sie ohnehin aus, aber liegen
   // lassen würde die Datenbank unnötig aufblähen.
   // Entdeckte Videos ausnehmen — deren Kanäle sind absichtlich nicht abonniert.
-  const waisen = all.filter((v) => v.source !== 'discovery' && !alleKanalIds.has(v.channelId));
+  const waisen = all.filter((v) => !v.saved && v.source !== 'discovery' && !alleKanalIds.has(v.channelId));
   for (const v of waisen) await db.del('videos', v.id);
   if (waisen.length) note(`${waisen.length} Videos entfernter Kanäle aufgeräumt.`);
 

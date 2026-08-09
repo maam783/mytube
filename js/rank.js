@@ -42,8 +42,11 @@ export function requiredViews(video, settings, now = Date.now()) {
 
 /** Warum ein Video nicht im Feed steht — oder null, wenn es durchkommt. */
 export function stage0Reject(video, settings, channelsById, now = Date.now(), blocked = new Set()) {
-  if (video.dismissed) return 'weggewischt';
+  if (video.dismissed) return 'ausgeblendet';
   if (video.watched) return 'gesehen';
+  // Gemerkte Videos sind geparkt: Sie leben in der Merkliste, nicht im Feed —
+  // „merken" heisst ja gerade „jetzt nicht, später".
+  if (video.saved) return 'gemerkt';
 
   if (video.source === 'discovery') {
     // Entdeckte Videos stammen aus Kanälen, die du nicht abonniert hast — die
