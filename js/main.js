@@ -209,7 +209,33 @@ async function viewFeed() {
     return wrap;
   }
 
-  for (const { video, exploration } of ordered) wrap.append(feedItem(video, exploration));
+  /** Markiert mehrere Videos in einem Rutsch als gesehen — ohne Bewertung. */
+  const markSeen = async (liste) => {
+    const aktuell = await Promise.all(liste.map((id) => db.get('videos', id)));
+    await db.putMany('videos', aktuell.filter(Boolean).map((v) => ({ ...v, watched: true })));
+  };
+
+  // „Ab hier alles ältere" — der Griff aus jedem RSS-Leser: Du scrollst bis
+  // dahin, wo du letztes Mal aufgehört hast, und räumst den Rest mit einem Tipp weg.
+  const markFromIndex = async (index) => {
+    const ids = ordered.slice(index).map((o) => o.video.id);
+    await markSeen(ids);
+    toast(`${ids.length} Videos als gesehen markiert.`);
+    render();
+  };
+
+  wrap.append(el('div', { class: 'bulkbar' },
+    el('button', {
+      class: 'btn ghost',
+      onclick: async () => {
+        if (!confirm(`Alle ${ordered.length} Videos im Feed als gesehen markieren?`)) return;
+        await markFromIndex(0);
+      },
+    }, `Alle ${ordered.length} als gesehen`)));
+
+  ordered.forEach(({ video, exploration }, index) => {
+    wrap.append(feedItem(video, exploration, { index, markFromIndex }));
+  });
   return wrap;
 }
 
@@ -222,7 +248,7 @@ async function viewFeed() {
  * dich) läuft nie. Deshalb das Element vorher festhalten und die Markierung
  * sofort setzen; das Schreiben in die Datenbank passiert danach.
  */
-function thumbButton(video, value, label, title) {
+function thumbButton(video, value, label, title, onNegative = null) {
   const btn = el('button', {
     class: 'btn icon', title,
     onclick: async () => {
@@ -233,7 +259,15 @@ function thumbButton(video, value, label, title) {
       if (gegenstueck && gegenstueck !== btn) gegenstueck.classList.remove('on-good', 'on-bad');
       try {
         await recordFeedback(video.id, 'thumb', value);
-        toast(good ? 'Notiert: mehr davon.' : 'Notiert: weniger davon.');
+        if (good) {
+          // Daumen hoch heisst nicht „erledigt" — das Video bleibt stehen,
+          // du willst es ja noch sehen.
+          toast('Notiert: mehr davon.');
+        } else {
+          await updateVideo(video.id, { watched: true });
+          toast('Notiert: weniger davon.');
+          onNegative?.();
+        }
       } catch (e) {
         btn.classList.remove('on-good', 'on-bad');
         toast(`Bewertung konnte nicht gespeichert werden: ${e.message}`, 'error');
@@ -243,7 +277,24 @@ function thumbButton(video, value, label, title) {
   return btn;
 }
 
-function feedItem(v, exploration) {
+/**
+ * Nach einem „Gesehen" anbieten, gleich alle älteren mitzunehmen. Steckt im
+ * Toast statt in einem eigenen Knopf pro Zeile — sonst hätte jede Zeile sechs
+ * Knöpfe, nur damit einer davon einmal am Tag gebraucht wird.
+ */
+function offerOlder(index, markFromIndex) {
+  const host = document.getElementById('toast-host');
+  const box = el('div', { class: 'toast', style: 'pointer-events:auto' },
+    el('span', {}, 'Gesehen. '),
+    el('button', {
+      class: 'btn ghost',
+      onclick: async () => { box.remove(); await markFromIndex(index); },
+    }, 'Auch alle älteren'));
+  host.append(box);
+  setTimeout(() => box.remove(), 6000);
+}
+
+function feedItem(v, exploration, { index = 0, markFromIndex = null } = {}) {
   const open = () => { location.hash = `#/v/${v.id}`; };
 
   const entdeckt = v.source === 'discovery';
@@ -269,18 +320,25 @@ function feedItem(v, exploration) {
       v.reason ? el('p', { class: 'reason' }, v.reason) : null,
       el('div', { class: 'actions' },
         thumbButton(v, 1, '👍', 'Mehr davon'),
-        thumbButton(v, -1, '👎', 'Weniger davon'),
+        // Daumen runter räumt die Zeile gleich weg — „weniger davon" und dann
+        // steht es trotzdem noch da wäre die falsche Antwort.
+        thumbButton(v, -1, '👎', 'Weniger davon — und weg damit', () => item.remove()),
         el('a', {
           class: 'btn', href: watchUrl(v.id), target: '_blank', rel: 'noopener',
+          // Wer hier tippt, geht schauen. Beim Zurückkommen einmal nachfragen,
+          // sonst bleibt das Video für immer ungesehen im Feed stehen.
+          onclick: () => armReturnPrompt(v),
         }, 'In YouTube'),
         el('button', {
-          class: 'btn ghost',
+          class: 'btn',
           onclick: async () => {
-            await updateVideo(v.id, { dismissed: true });
-            await recordFeedback(v.id, 'dismiss', -0.3);
+            // Neutral: kein Signal an den Filter. „Schon gesehen" heisst nicht
+            // „gefällt mir nicht" — vorher stand hier ein Minuspunkt.
+            await updateVideo(v.id, { watched: true });
             item.remove();
+            if (markFromIndex) offerOlder(index, markFromIndex);
           },
-        }, 'Ausblenden'),
+        }, 'Gesehen'),
         // Nur bei Entdeckungen: den Kanal dauerhaft aufnehmen oder loswerden.
         entdeckt ? el('button', {
           class: 'btn',

@@ -101,6 +101,31 @@ ein Tagesbudget mit hartem Stop.
 
 ---
 
+## Gesehenes wegräumen
+
+Der Feed wächst, bis du sagst, was erledigt ist. Vier Wege, je nach Situation:
+
+| | Signal an den Filter | Zeile |
+|---|---|---|
+| 👍 | „mehr davon" | **bleibt** — du willst es ja noch sehen |
+| 👎 | „weniger davon" | verschwindet |
+| **Gesehen** | **keins** | verschwindet |
+| **Alle N als gesehen** | keins | alles weg |
+
+Der Unterschied zwischen 👎 und *Gesehen* ist der wichtige: „Schon gesehen" ist
+keine Kritik. Wer sein Postfach mit dem Daumen leerräumt, bringt dem Filter bei,
+dass er all das nicht mag.
+
+Nach jedem *Gesehen* bietet die Meldung **„Auch alle älteren"** an — der Griff
+aus jedem RSS-Leser. Du scrollst bis dahin, wo du letztes Mal aufgehört hast,
+tippst einmal und der Rest ist weg.
+
+Automatisch als gesehen gilt außerdem: ein Video, das im eingebetteten Player zu
+Ende oder über 90 % läuft, und eines, bei dem du nach *„In YouTube öffnen"*
+zurückkommst und die Rückfrage beantwortest.
+
+---
+
 ## Sortierung
 
 **Neueste zuerst** — strikt chronologisch. Was die Stufe-0-Filter überlebt, steht

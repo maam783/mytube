@@ -423,3 +423,11 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   color: var(--accent);
 }
+
+/* Sammelaktion über dem Feed. */
+.bulkbar {
+  display: flex;
+  justify-content: flex-end;
+  margin: -6px 0 10px;
+}
+.bulkbar .btn { font-size: 13px; min-height: 38px; }
