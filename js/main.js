@@ -840,11 +840,15 @@ async function viewFeed() {
   const globalIdx = new Map(ordered.map((o, i) => [o.video.id, i]));
   wrap.append(heroCard(hero, 0));
 
-  const buckets = new Map();
+  // Feste Reihenfolge unabhängig vom Ranking — sonst kann im KI-Modus ein
+  // paar Tage altes, aber hoch bewertetes Video seine Sektion vor „Heute"
+  // schieben, weil die Map sonst in Auftauchreihenfolge im Stream einsortiert.
+  const buckets = new Map([['Heute', []], ['Gestern', []], ['Diese Woche', []], ['Älter', []]]);
   for (const o of stream) {
-    const b = dayBucket(o.video.publishedAt);
-    if (!buckets.has(b)) buckets.set(b, []);
-    buckets.get(b).push(o);
+    buckets.get(dayBucket(o.video.publishedAt)).push(o);
+  }
+  for (const [name, members] of [...buckets]) {
+    if (!members.length) buckets.delete(name);
   }
 
   // Karten gibt es nur ganz oben: die ersten vier Videos der OBERSTEN Sektion.
