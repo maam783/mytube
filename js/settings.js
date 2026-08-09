@@ -30,6 +30,11 @@ export const DEFAULTS = {
   discoveryRampDays: 3,        // frische Videos hatten noch keine Chance
   popularityWeight: 0.5,       // „mehr Aufrufe ist besser" im KI-Ranking
 
+  // Geräteabgleich (privates GitHub-Repo; diese drei bleiben pro Gerät)
+  syncRepo: '',
+  syncToken: '',
+  syncPass: '',
+
   // Sync
   concurrency: 5,
   itemsPerChannel: 15,

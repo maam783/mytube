@@ -3,7 +3,7 @@
 // Beim Ändern der App die Version hochzählen, sonst serviert das iPad die alte
 // Fassung weiter. In den Einstellungen gibt es dafür auch einen Update-Knopf.
 
-const VERSION = 'v10';
+const VERSION = 'v11';
 const CACHE = `mytube-${VERSION}`;
 
 const SHELL = [
@@ -17,6 +17,7 @@ const SHELL = [
   './js/youtube.js',
   './js/ai.js',
   './js/rank.js',
+  './js/cloudsync.js',
   './js/sync.js',
   './js/anthropic.js',
   './icon.svg',

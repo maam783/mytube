@@ -3,6 +3,7 @@ import * as yt from './youtube.js';
 import * as ai from './ai.js';
 import * as S from './settings.js';
 import * as sync from './sync.js';
+import * as cloud from './cloudsync.js';
 import { rank, stage0, ageDays } from './rank.js';
 
 // ---------- kleine Helfer ----------
@@ -196,6 +197,11 @@ async function runSync() {
     btn.classList.remove('busy');
     bar.hidden = true;
     render();
+    // Frischen Stand zu den anderen Geräten schieben — im Hintergrund,
+    // ein Fehlschlag (Hotel-WLAN) bricht nichts.
+    S.load().then((s) => {
+      if (cloud.isConfigured(s)) cloud.syncNow().catch(() => { /* nächstes Mal */ });
+    });
   }
 }
 
@@ -1545,6 +1551,49 @@ async function viewSettings() {
     }, 'Speichern'),
     el('span', { class: 'savehint' }, 'Änderungen werden automatisch übernommen')));
 
+  // Geräteabgleich
+  const syncStatus = el('p', { class: 'hint' });
+  cloud.lastSyncInfo().then((info) => {
+    if (info) syncStatus.textContent = `Letzter Abgleich: ${new Date(info.at).toLocaleString('de-DE')}`;
+  });
+  wrap.append(el('div', { class: 'card' },
+    el('h2', { style: 'margin-top:0' }, 'Geräteabgleich'),
+    el('p', { class: 'hint', style: 'margin-top:0' },
+      'Teilt Kanäle, Einstellungen, Manifest, Gesehen-Status und Merkliste '
+      + 'zwischen Mac, iPad und iPhone — über ein privates GitHub-Repository, '
+      + 'clientseitig verschlüsselt. GitHub sieht nur Zufallsbytes; deine '
+      + 'API-Keys wandern deshalb sicher mit.'),
+    field('syncRepo', 'Privates Repository', { placeholder: 'maam783/mytube-sync' },
+      'Ein leeres privates Repo. Auf github.com anlegen oder ein vorhandenes nehmen.'),
+    field('syncToken', 'GitHub-Token (fine-grained)', keyAttrs,
+      'github.com → Settings → Developer settings → Fine-grained tokens: nur '
+      + 'dieses eine Repo auswählen, einzige Berechtigung „Contents: Read and '
+      + 'write". So kann das Token nichts außer dieser einen Datei.'),
+    field('syncPass', 'Sync-Passwort', keyAttrs,
+      'Frei wählbar, auf jedem Gerät dasselbe. Verschlüsselt die Daten, bevor '
+      + 'sie GitHub erreichen — ohne dieses Passwort ist die Datei wertlos.'),
+    el('div', { class: 'row', style: 'margin-top:4px' },
+      el('button', {
+        class: 'btn',
+        onclick: async (e) => {
+          const btn = e.currentTarget;
+          btn.disabled = true;
+          syncStatus.textContent = 'Gleiche ab…';
+          try {
+            await persist();
+            const r = await cloud.syncNow();
+            syncStatus.textContent = `Abgeglichen ${new Date().toLocaleTimeString('de-DE')}`
+              + (r.hatteRemote ? '' : ' — erster Stand angelegt.');
+            toast('Geräteabgleich erfolgreich.');
+            render();
+          } catch (err) {
+            syncStatus.textContent = '';
+            toast(err.message, 'error', 8000);
+          } finally { btn.disabled = false; }
+        },
+      }, 'Jetzt abgleichen')),
+    syncStatus));
+
   // Backup
   wrap.append(el('div', { class: 'card', style: 'margin-top:24px' },
     el('h2', { style: 'margin-top:0' }, 'Sicherung'),
@@ -1770,5 +1819,15 @@ window.addEventListener('resize', setTopbarHeight);
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => { /* offline-Schale ist optional */ });
+  }
+
+  // Beim Start einmal abgleichen: Was du auf dem iPad weggeräumt hast, ist
+  // dann auch auf dem Mac weg. Läuft im Hintergrund — ein Fehlschlag (kein
+  // Netz) darf den Start nicht aufhalten.
+  const s = await S.load();
+  if (cloud.isConfigured(s)) {
+    cloud.syncNow()
+      .then((r) => { if (r.remoteWarNeuer) render(); })
+      .catch((e) => toast(`Geräteabgleich: ${e.message}`, 'warn', 6000));
   }
 })();

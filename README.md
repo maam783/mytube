@@ -101,6 +101,61 @@ ein Tagesbudget mit hartem Stop.
 
 ---
 
+## Geräteabgleich (Mac · iPad · iPhone)
+
+Die App läuft auf jedem Gerät mit eigener Datenbank — der Abgleich teilt
+Kanäle, Einstellungen, Manifest, API-Keys, Gesehen-Status und Merkliste über
+**ein privates GitHub-Repository**. Kein Server, kein Konto, keine Kosten.
+
+**Warum das sicher ist:** Die App verschlüsselt den Stand im Browser
+(AES-256-GCM, Schlüssel per PBKDF2 aus deinem Sync-Passwort, 150.000
+Iterationen) und lädt erst danach hoch. GitHub sieht ausschließlich
+Zufallsbytes — nachgemessen: weder Kanalnamen noch Videotitel noch der
+API-Key stehen im Klartext in der Datei. Deshalb dürfen die API-Keys
+mitwandern, was den Punkt der Übung ausmacht: einmal einrichten, überall
+fertig.
+
+### Einrichten (einmal, dann pro Gerät 30 Sekunden)
+
+1. **Privates Repo** anlegen — leer genügt: `github.com/new`, Sichtbarkeit
+   *Private*. Zum Beispiel `DEINNAME/mytube-sync`.
+2. **Fine-grained Token**: github.com → Settings → Developer settings →
+   *Personal access tokens* → *Fine-grained tokens* → *Generate new token*.
+   - *Repository access*: **Only select repositories** → nur dieses eine Repo
+   - *Permissions* → *Repository permissions* → **Contents: Read and write**
+     (sonst nichts)
+   - Ablaufdatum nach Geschmack; danach neu erzeugen und eintragen.
+3. In der App auf **jedem** Gerät: Einstellungen → **Geräteabgleich** →
+   Repo, Token und ein frei gewähltes **Sync-Passwort** (auf allen Geräten
+   dasselbe) → *Jetzt abgleichen*.
+
+Danach läuft der Abgleich automatisch beim App-Start und nach jedem
+„Aktualisieren".
+
+### Wie zusammengeführt wird
+
+| | Regel |
+|---|---|
+| Einstellungen, Manifest, Kanalliste | Der zuletzt geschriebene Stand gewinnt |
+| API-Keys | Ein leerer Wert überschreibt nie einen vorhandenen |
+| Gesehen / Ausgeblendet | **ODER** — einmal irgendwo weggeräumt heißt überall weg |
+| Merkliste | Vereinigung beider Geräte |
+| Bewertungen | Nach Zeitstempel, jüngste gewinnt |
+
+Videos selbst wandern nicht mit (nur ihr Zustand) — die holt sich jedes Gerät
+über die YouTube-API. Ausnahme: gemerkte Videos wandern komplett, damit die
+Merkliste auch auf einem Gerät erscheint, das das Video nie geladen hat.
+
+Ändern zwei Geräte gleichzeitig etwas, antwortet GitHub mit `409`; die App
+zieht dann neu, führt zusammen und schiebt erneut — verifiziert.
+
+> **Das Sync-Passwort wird nirgends gespeichert außer auf deinen Geräten.**
+> Vergisst du es, ist die Datei auf GitHub wertlos — dann löschst du sie und
+> richtest neu ein. Repo, Token und Passwort wandern bewusst *nicht* mit; die
+> tippst du pro Gerät einmal ein.
+
+---
+
 ## Gesehenes wegräumen
 
 Der Feed wächst, bis du sagst, was erledigt ist. Vier Wege, je nach Situation:
