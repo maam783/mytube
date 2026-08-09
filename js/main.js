@@ -87,10 +87,20 @@ async function unblockChannel(channelId) {
   }
 }
 
+/**
+ * Feedback mit deterministischer ID `typ:videoId`: Ein zweiter Daumen auf
+ * dasselbe Video überschreibt die alte Wertung, statt sie zu duplizieren —
+ * und macht sie per Löschen der ID sauber zurücknehmbar.
+ */
 async function recordFeedback(videoId, type, value) {
   await db.put('feedback', {
+    id: `${type}:${videoId}`,
     videoId, type, value, createdAt: new Date().toISOString(),
   });
+}
+
+async function clearFeedback(videoId, type) {
+  await db.del('feedback', `${type}:${videoId}`);
 }
 
 async function updateVideo(id, patch) {
@@ -144,7 +154,21 @@ async function runSync() {
         return;
       }
       // Videos sind vollständig — anzeigen, ohne auf die Bewertung zu warten.
-      if (ev.phase === 'ingested') { render(); return; }
+      // Aber: Wer gerade mitten im Feed liest, wird nicht an den Anfang
+      // gerissen — der bekommt ein Angebot statt eines Zwangs-Renders.
+      if (ev.phase === 'ingested') {
+        const onFeed = (location.hash || '#/') === '#/';
+        if (!onFeed || window.scrollY < 80) { render(); return; }
+        if (!document.getElementById('new-pill')) {
+          const pill = el('button', {
+            id: 'new-pill', class: 'new-pill',
+            onclick: () => { pill.remove(); window.scrollTo(0, 0); render(); },
+          }, 'Neue Videos ↑');
+          document.body.append(pill);
+          setTimeout(() => pill.remove(), 30000);
+        }
+        return;
+      }
       if (ev.phase === 'done') return;
       const pct = ev.total ? Math.round((ev.done / ev.total) * 100) : 0;
       fill.style.width = `${pct}%`;
@@ -175,7 +199,317 @@ async function runSync() {
   }
 }
 
-// ---------- Feed ----------
+// ---------- Feed: „Die Tagesausgabe" ----------
+//
+// Der Feed ist als privates Tagesblatt gebaut: Masthead mit Datum und
+// Live-Zähler, Tages-Sektionen, das Top-Video als Hero, danach Karten und
+// ruhige Zeilen direkt auf dem Papier. Rang zeigt sich durch Form, nicht
+// durch ein Score-Badge. Der reason-Satz spricht in kursiver Serife — die
+// wiedererkennbare Stimme der Redaktion.
+
+/** Dauer als Text für Bylines/Overlines ("42 Min.", "1 Std. 15 Min."). */
+function fmtMins(sec) {
+  if (!sec) return 'Live';
+  const h = Math.floor(sec / 3600);
+  const m = Math.round((sec % 3600) / 60);
+  if (h) return m ? `${h} Std. ${m} Min.` : `${h} Std.`;
+  return `${Math.max(1, m)} Min.`;
+}
+
+function dayBucket(iso) {
+  const d = new Date(iso);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
+  const week = new Date(today); week.setDate(week.getDate() - 6);
+  if (d >= today) return 'Heute';
+  if (d >= yesterday) return 'Gestern';
+  if (d >= week) return 'Diese Woche';
+  return 'Älter';
+}
+
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// --- Live-Zähler im Masthead ---
+
+let feedCountEl = null;
+let feedCount = 0;
+
+function setFeedCount(n) {
+  feedCount = Math.max(0, n);
+  if (feedCountEl?.isConnected) feedCountEl.textContent = String(feedCount);
+}
+const bumpFeedCount = (delta) => setFeedCount(feedCount + delta);
+
+// --- Undo-Leiste: EINE fixe Leiste ersetzt confirm() und Toast-Stapel ---
+
+let undoState = null;
+
+function dismissUndo() {
+  if (!undoState) return;
+  clearTimeout(undoState.timer);
+  undoState.el.remove();
+  undoState = null;
+}
+
+/**
+ * Persistenz ist zu diesem Zeitpunkt IMMER schon geschrieben (kein Datenverlust
+ * beim App-Wechsel); undoFn kehrt sie um. Eine neue Aktion ersetzt die Leiste —
+ * die vorherige gilt dann endgültig.
+ */
+function showUndo(label, undoFn) {
+  dismissUndo();
+  const bar = el('div', { class: 'undobar', role: 'status' },
+    el('span', { class: 'undobar-text' }, label),
+    el('button', {
+      class: 'btn ghost',
+      onclick: async () => {
+        dismissUndo();
+        try { await undoFn(); } catch (e) { toast(e.message, 'error'); }
+      },
+    }, 'Rückgängig'),
+    el('span', { class: 'undobar-line' }));
+  document.body.append(bar);
+  void bar.offsetHeight; // Reflow statt rAF — rAF feuert in Hintergrund-Tabs nicht
+  bar.classList.add('run');
+  undoState = { el: bar, timer: setTimeout(dismissUndo, 5000) };
+}
+
+// --- Entfernen mit Höhenkollaps, Wiedereinsetzen für Undo ---
+
+function collapseRemove(node, done = null) {
+  let fired = false;
+  const finish = () => {
+    if (fired) return;
+    fired = true;
+    node.remove();
+    done?.();
+  };
+  if (reducedMotion()) {
+    node.style.transition = 'opacity 120ms ease';
+    node.style.opacity = '0';
+    setTimeout(finish, 130);
+    return;
+  }
+  node.style.height = `${node.offsetHeight}px`;
+  node.style.overflow = 'hidden';
+  void node.offsetHeight; // Reflow, damit die Start-Höhe steht
+  node.style.transition = 'all 220ms cubic-bezier(.2,0,0,1)';
+  node.style.height = '0';
+  node.style.opacity = '0';
+  node.style.paddingTop = '0';
+  node.style.paddingBottom = '0';
+  node.style.marginTop = '0';
+  node.style.marginBottom = '0';
+  node.addEventListener('transitionend', finish, { once: true });
+  setTimeout(finish, 320);
+}
+
+/** Merkt sich die DOM-Position eines Elements, um es beim Undo zurückzuhängen. */
+function rememberSlot(node) {
+  return { node, parent: node.parentElement, next: node.nextElementSibling };
+}
+
+function restoreSlot(slot) {
+  if (!slot.parent?.isConnected) { render(); return; }
+  slot.node.removeAttribute('style');
+  if (slot.next?.isConnected) slot.parent.insertBefore(slot.node, slot.next);
+  else slot.parent.append(slot.node);
+}
+
+// --- Das ···-Menü (Popover auf dem iPad, Bottom-Sheet auf dem iPhone) ---
+
+function openMenu(anchor, entries) {
+  const narrow = matchMedia('(max-width: 719px)').matches;
+  const menu = el('div', { class: narrow ? 'sheet' : 'menu', role: 'menu' });
+
+  let close;
+  for (const entry of entries) {
+    if (!entry) continue;
+    if (entry.sep) { menu.append(el('div', { class: 'menu-sep' })); continue; }
+    if (entry.inert) { menu.append(el('div', { class: 'menu-inert' }, entry.label)); continue; }
+    menu.append(el('button', {
+      class: `menu-item${entry.danger ? ' danger' : ''}`,
+      role: 'menuitem',
+      onclick: async () => { close(); try { await entry.onTap(); } catch (e) { toast(e.message, 'error'); } },
+    },
+      el('span', { class: 'menu-ico', 'aria-hidden': 'true' }, entry.icon || ''),
+      el('span', { class: 'menu-label' }, entry.label),
+      entry.checked ? el('span', { class: 'menu-check' }, '✓') : null));
+  }
+
+  let scrim = null;
+  const onOutside = (e) => { if (!menu.contains(e.target)) close(); };
+  const onEsc = (e) => { if (e.key === 'Escape') close(); };
+  close = () => {
+    menu.remove();
+    scrim?.remove();
+    document.removeEventListener('pointerdown', onOutside, true);
+    document.removeEventListener('keydown', onEsc);
+    anchor?.focus?.();
+  };
+
+  if (narrow) {
+    scrim = el('div', { class: 'scrim', onclick: () => close() });
+    document.body.append(scrim, menu);
+    // Kein rAF: das feuert in Hintergrund-Tabs nicht. Reflow erzwingen, damit
+    // der Startzustand steht, dann die Klasse — die Transition läuft trotzdem.
+    void menu.offsetHeight;
+    scrim.classList.add('open');
+    menu.classList.add('open');
+  } else {
+    document.body.append(menu);
+    const r = anchor.getBoundingClientRect();
+    const x = Math.min(Math.max(8, r.right - menu.offsetWidth), innerWidth - menu.offsetWidth - 8);
+    let y = r.bottom + 6;
+    if (y + menu.offsetHeight > innerHeight - 8) y = r.top - menu.offsetHeight - 6;
+    menu.style.left = `${Math.max(8, x)}px`;
+    menu.style.top = `${Math.max(8, y)}px`;
+  }
+  // Erst im nächsten Tick lauschen, sonst schliesst der öffnende Tipp sofort.
+  setTimeout(() => {
+    document.addEventListener('pointerdown', onOutside, true);
+    document.addEventListener('keydown', onEsc);
+  }, 0);
+  return close;
+}
+
+/** Pseudo-Anker für „Menü an der Fingerposition" (Long-Press). */
+const pointAnchor = (x, y) => ({
+  getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y, width: 0, height: 0 }),
+  focus: () => {},
+});
+
+// --- Rechts-Wisch „Gesehen" (nur Listenzeilen) ---
+
+const SWIPE = { COMMIT: 96, SLOP: 8, AXIS: 1.2, DAMP: 0.4, EDGE: 28, FLICK: 0.5, FLICK_MIN: 32 };
+
+function attachSwipe(wrap, row, { onCommit, onLongPress }) {
+  let axis = null;
+  let startX = 0; let startY = 0; let dx = 0;
+  let lastX = 0; let lastT = 0; let vel = 0;
+  let lpTimer = null;
+  let swiped = false;
+
+  const resetVisual = () => {
+    row.classList.remove('dragging');
+    wrap.classList.remove('commit');
+    row.style.transition = `transform 250ms cubic-bezier(.2,.9,.3,1.15)`;
+    row.style.transform = '';
+  };
+
+  row.addEventListener('pointerdown', (e) => {
+    // 28px Totzone am linken Rand: dort wohnt der iOS-Zurück-Wisch.
+    if (!e.isPrimary || e.clientX < SWIPE.EDGE) return;
+    if (e.target.closest('button, a, .btn')) return;
+    axis = null; dx = 0; swiped = false;
+    startX = e.clientX; startY = e.clientY;
+    lastX = e.clientX; lastT = e.timeStamp; vel = 0;
+    row.style.transition = '';
+    clearTimeout(lpTimer);
+    lpTimer = setTimeout(() => {
+      if (axis === null) { swiped = true; onLongPress(startX, startY); }
+    }, 450);
+    try { row.setPointerCapture(e.pointerId); } catch { /* egal */ }
+  });
+
+  row.addEventListener('pointermove', (e) => {
+    if (!e.isPrimary) return;
+    const mx = e.clientX - startX;
+    const my = e.clientY - startY;
+    if (axis === null) {
+      if (Math.abs(mx) < SWIPE.SLOP && Math.abs(my) < SWIPE.SLOP) return;
+      axis = Math.abs(mx) > Math.abs(my) * SWIPE.AXIS ? 'h' : 'v';
+      if (axis === 'h') { clearTimeout(lpTimer); row.classList.add('dragging'); }
+      else { clearTimeout(lpTimer); return; } // vertikal: der Browser scrollt
+    }
+    if (axis !== 'h') return;
+    dx = Math.max(0, mx); // nur nach rechts; links bleibt dem System
+    const shifted = dx <= SWIPE.COMMIT ? dx : SWIPE.COMMIT + (dx - SWIPE.COMMIT) * SWIPE.DAMP;
+    row.style.transform = `translateX(${shifted}px)`;
+    wrap.classList.toggle('commit', dx >= SWIPE.COMMIT);
+    const dt = e.timeStamp - lastT;
+    if (dt > 0) vel = (e.clientX - lastX) / dt;
+    lastX = e.clientX; lastT = e.timeStamp;
+  });
+
+  const finish = (e) => {
+    clearTimeout(lpTimer);
+    if (axis !== 'h') { axis = null; return; }
+    swiped = true;
+    const commit = dx >= SWIPE.COMMIT || (vel > SWIPE.FLICK && dx > SWIPE.FLICK_MIN);
+    if (commit && !reducedMotion()) {
+      row.style.transition = 'transform 200ms cubic-bezier(.2,.7,.3,1)';
+      row.style.transform = 'translateX(100vw)';
+      const go = () => onCommit();
+      row.addEventListener('transitionend', go, { once: true });
+      setTimeout(go, 260);
+    } else if (commit) {
+      onCommit();
+    } else {
+      resetVisual();
+    }
+    axis = null;
+    void e;
+  };
+  row.addEventListener('pointerup', finish);
+  row.addEventListener('pointercancel', (e) => { clearTimeout(lpTimer); if (axis === 'h') resetVisual(); axis = null; void e; });
+
+  // Nach einer erkannten Geste den folgenden Click schlucken.
+  row.addEventListener('click', (e) => {
+    if (swiped) { e.stopPropagation(); e.preventDefault(); swiped = false; }
+  }, true);
+}
+
+// --- Bausteine ---
+
+function openTarget(v) {
+  if (!v.embeddable || v.embedFailed || v.ageRestricted) {
+    // Kein Umweg über eine Detailseite, deren Player sowieso nicht darf.
+    armReturnPrompt(v);
+    window.open(watchUrl(v.id), '_blank', 'noopener');
+    return;
+  }
+  location.hash = `#/v/${v.id}`;
+}
+
+function makeTappable(node, v) {
+  node.setAttribute('role', 'button');
+  node.setAttribute('tabindex', '0');
+  node.setAttribute('aria-label', `Video öffnen: ${v.title}`);
+  node.addEventListener('click', (e) => {
+    if (e.target.closest('button, a, .btn, .menu, .sheet')) return;
+    openTarget(v);
+  });
+  node.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTarget(v); }
+  });
+}
+
+function thumbShell(v, { rounded = '10px' } = {}) {
+  return el('div', { class: 'tshell', style: `border-radius:${rounded}` },
+    v.thumb ? el('img', { src: v.thumb, alt: '', loading: 'lazy', decoding: 'async' }) : null,
+    el('span', { class: 'dur' }, fmtDuration(v.durationSec)),
+    (!v.embeddable || v.embedFailed || v.ageRestricted)
+      ? el('span', { class: 'ext', title: 'Öffnet in YouTube' }, '↗') : null);
+}
+
+/** Overline "KANAL · VOR 2 STD. · 42 MIN." mit farbigen Präfixen. */
+function overline(v, exploration, { discovery = false } = {}) {
+  const parts = [];
+  if (v.liveStatus === 'live') parts.push(el('span', { class: 'ov-good' }, 'Live'));
+  if (v.liveStatus === 'upcoming') parts.push(el('span', { class: 'ov-warn' }, 'Premiere'));
+  if (exploration) parts.push(el('span', { class: 'ov-warn' }, 'Ausprobiert für dich'));
+  if (discovery) parts.push(el('span', { class: 'ov-accent' }, 'Nicht abonniert'));
+  const base = [v.channelTitle, fmtAge(v.publishedAt)];
+  if (!v.liveStatus) base.push(fmtMins(v.durationSec));
+  const node = el('div', { class: 'overline' });
+  for (const p of parts) { node.append(p, ' · '); }
+  node.append(base.join(' · '));
+  return node;
+}
+
+// ---------- Der Feed selbst ----------
 
 async function viewFeed() {
   const { settings, videos, channels, channelsById, blocked } = await loadContext();
@@ -190,187 +524,346 @@ async function viewFeed() {
 
   const { kept, rejected } = stage0(videos, settings, channelsById, Date.now(), blocked);
   const ordered = rank(kept, settings, channelsById);
+  const rejectedTotal = [...rejected.values()].reduce((a, b) => a + b, 0);
 
-  const wrap = el('div');
-  const rejectSummary = [...rejected.entries()]
-    .sort((a, b) => b[1] - a[1]).slice(0, 4)
-    .map(([why, n]) => `${n} ${why}`).join(' · ');
+  const wrap = el('div', { class: 'paper' });
 
-  wrap.append(el('div', { class: 'feed-meta' },
-    el('span', {}, `${ordered.length} Videos · letzte ${settings.maxAgeDays} Tage`),
-    rejectSummary ? el('span', {}, `ausgefiltert: ${rejectSummary}`) : null));
-
+  // --- Leerer Zustand: „Blatt weggelegt" ---
   if (!ordered.length) {
-    wrap.append(el('div', { class: 'empty' },
-      el('strong', {}, 'Nichts Neues'),
-      el('p', {}, videos.length
-        ? 'Alle aktuellen Videos sind gesehen oder ausgefiltert. Tippe auf „Aktualisieren".'
-        : 'Noch nichts geladen. Tippe auf „Aktualisieren".')));
+    const last = await db.kvGet('lastSync', null);
+    const check = el('div', { class: 'empty done', html:
+      `<svg viewBox="0 0 56 56" width="56" height="56" aria-hidden="true">
+        <path class="tick" d="M12 30 L24 42 L45 16" fill="none" stroke="var(--good)"
+          stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>` });
+    check.append(
+      el('strong', {}, videos.length ? 'Alles gesehen' : 'Noch nichts geladen'),
+      el('p', {}, last && videos.length
+        ? `Stand: ${new Date(last.at).toLocaleString('de-DE', { weekday: 'long', hour: '2-digit', minute: '2-digit' })} — tippe auf „Aktualisieren" für Neues.`
+        : 'Tippe oben auf „Aktualisieren".'));
+    wrap.append(check);
     return wrap;
   }
 
-  /** Markiert mehrere Videos in einem Rutsch als gesehen — ohne Bewertung. */
-  const markSeen = async (liste) => {
-    const aktuell = await Promise.all(liste.map((id) => db.get('videos', id)));
-    await db.putMany('videos', aktuell.filter(Boolean).map((v) => ({ ...v, watched: true })));
+  // --- Aufteilen: Hero, Entdeckungen, Karten, Zeilen ---
+  const isWide = matchMedia('(min-width: 720px)').matches;
+  const hero = ordered[0];
+  const rest = ordered.slice(1);
+  const discoveries = rest.filter((o) => o.video.source === 'discovery');
+  const stream = rest.filter((o) => o.video.source !== 'discovery');
+  const cardSet = new Set(isWide ? stream.slice(0, 4).map((o) => o.video.id) : []);
+
+  setFeedCount(ordered.length);
+  wrap.append(el('header', { class: 'masthead' },
+    el('div', { class: 'overline' }, 'Dein Feed · noch ',
+      (feedCountEl = el('span', {}, String(feedCount)))),
+    el('h1', { class: 'masthead-date' },
+      new Date().toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' }))));
+
+  // --- Gemeinsame Aktionen ---
+
+  const markSeen = async (ids) => {
+    const rows = await Promise.all(ids.map((id) => db.get('videos', id)));
+    const fresh = rows.filter((v) => v && !v.watched);
+    await db.putMany('videos', fresh.map((v) => ({ ...v, watched: true })));
+    return fresh.map((v) => v.id);
   };
 
-  // „Ab hier alles ältere" — der Griff aus jedem RSS-Leser: Du scrollst bis
-  // dahin, wo du letztes Mal aufgehört hast, und räumst den Rest mit einem Tipp weg.
-  const markFromIndex = async (index) => {
-    const ids = ordered.slice(index).map((o) => o.video.id);
-    await markSeen(ids);
-    toast(`${ids.length} Videos als gesehen markiert.`);
+  const unmarkSeen = async (ids) => {
+    const rows = await Promise.all(ids.map((id) => db.get('videos', id)));
+    await db.putMany('videos', rows.filter(Boolean).map((v) => ({ ...v, watched: false })));
+  };
+
+  /** Sammelaktion: markieren, neu rendern, Undo anbieten. */
+  const bulkSeen = async (ids, label) => {
+    const done = await markSeen(ids);
+    if (!done.length) return;
     render();
+    showUndo(label(done.length), async () => { await unmarkSeen(done); render(); });
   };
 
-  wrap.append(el('div', { class: 'bulkbar' },
-    el('button', {
-      class: 'btn ghost',
-      onclick: async () => {
-        if (!confirm(`Alle ${ordered.length} Videos im Feed als gesehen markieren?`)) return;
-        await markFromIndex(0);
-      },
-    }, `Alle ${ordered.length} als gesehen`)));
+  const seenSingle = async (v, wrapEl) => {
+    await updateVideo(v.id, { watched: true });
+    const slot = rememberSlot(wrapEl);
+    collapseRemove(wrapEl);
+    bumpFeedCount(-1);
+    const kurz = v.title.length > 34 ? `${v.title.slice(0, 34)}…` : v.title;
+    showUndo(`Gesehen · „${kurz}"`, async () => {
+      await updateVideo(v.id, { watched: false });
+      restoreSlot(slot);
+      bumpFeedCount(1);
+    });
+  };
 
-  ordered.forEach(({ video, exploration }, index) => {
-    wrap.append(feedItem(video, exploration, { index, markFromIndex }));
-  });
+  const dislikeSingle = async (v, wrapEl) => {
+    await recordFeedback(v.id, 'thumb', -1);
+    await updateVideo(v.id, { watched: true, rating: -1 });
+    const slot = rememberSlot(wrapEl);
+    collapseRemove(wrapEl);
+    bumpFeedCount(-1);
+    showUndo('Weniger davon — ausgeblendet', async () => {
+      await clearFeedback(v.id, 'thumb');
+      await updateVideo(v.id, { watched: false, rating: null });
+      restoreSlot(slot);
+      bumpFeedCount(1);
+    });
+  };
+
+  const toggleLike = async (v) => {
+    const cur = await db.get('videos', v.id);
+    if (cur?.rating === 1) {
+      await clearFeedback(v.id, 'thumb');
+      await updateVideo(v.id, { rating: null });
+      toast('Wertung entfernt.');
+    } else {
+      await recordFeedback(v.id, 'thumb', 1);
+      await updateVideo(v.id, { rating: 1 });
+      toast('Notiert: mehr davon.');
+    }
+  };
+
+  const markFromHere = async (idx) => {
+    const ids = [...wrap.querySelectorAll('[data-idx]')]
+      .filter((n) => Number(n.dataset.idx) >= idx)
+      .map((n) => n.dataset.id);
+    await bulkSeen(ids, (n) => `${n} als gesehen markiert`);
+  };
+
+  const remainingFrom = (idx) =>
+    [...wrap.querySelectorAll('[data-idx]')].filter((n) => Number(n.dataset.idx) >= idx).length;
+
+  const subscribeChannel = async (v) => {
+    const s = await S.load();
+    const kanal = await yt.resolveChannel(v.channelId, s.ytKey);
+    const wasBlocked = (await db.kvGet('blockedChannels', [])).includes(v.channelId);
+    await db.put('channels', kanal);
+    await unblockChannel(v.channelId);
+    // Bestehende Entdeckungen des Kanals werden zu normalen Abo-Videos.
+    const flipped = (await db.getAll('videos'))
+      .filter((x) => x.channelId === v.channelId && x.source === 'discovery');
+    await db.putMany('videos', flipped.map((x) => ({ ...x, source: 'subscription' })));
+    const slots = [...wrap.querySelectorAll(`[data-channel-id="${v.channelId}"]`)].map(rememberSlot);
+    for (const s2 of slots) { collapseRemove(s2.node); bumpFeedCount(-1); }
+    showUndo(`„${kanal.title}" abonniert`, async () => {
+      await db.del('channels', kanal.id);
+      if (wasBlocked) await blockChannel(v.channelId);
+      await db.putMany('videos', flipped.map((x) => ({ ...x, source: 'discovery' })));
+      render();
+    });
+  };
+
+  const blockDiscovery = async (v) => {
+    await blockChannel(v.channelId);
+    const isSub = Boolean(await db.get('channels', v.channelId));
+    const slots = [...wrap.querySelectorAll(`[data-channel-id="${v.channelId}"]`)].map(rememberSlot);
+    for (const s2 of slots) { collapseRemove(s2.node); bumpFeedCount(-1); }
+    showUndo(`„${v.channelTitle}" wird nicht mehr vorgeschlagen${isSub ? ' (Abo bleibt)' : ''}`,
+      async () => {
+        await unblockChannel(v.channelId);
+        for (const s2 of slots) { restoreSlot(s2); bumpFeedCount(1); }
+      });
+  };
+
+  const menuFor = (v, wrapEl, idx, { discovery = false } = {}) => async (anchor) => {
+    const cur = await db.get('videos', v.id) || v;
+    openMenu(anchor, [
+      { icon: '👍', label: 'Mehr davon', checked: cur.rating === 1, onTap: () => toggleLike(v) },
+      { icon: '👎', label: 'Weniger davon — und ausblenden', onTap: () => dislikeSingle(v, wrapEl) },
+      { icon: '↗', label: 'In YouTube öffnen', onTap: () => { armReturnPrompt(v); window.open(watchUrl(v.id), '_blank', 'noopener'); } },
+      idx != null ? { icon: '✓', label: `Ab hier alle als gesehen (${remainingFrom(idx)})`, onTap: () => markFromHere(idx) } : null,
+      discovery ? { sep: true } : null,
+      discovery ? { icon: '✓', label: 'Gesehen', onTap: () => seenSingle(v, wrapEl) } : null,
+      discovery ? { icon: '+', label: 'Kanal abonnieren', onTap: () => subscribeChannel(v) } : null,
+      discovery ? { icon: '✕', label: 'Nie wieder vorschlagen', danger: true, onTap: () => blockDiscovery(v) } : null,
+      v.score != null ? { inert: true, label: `Score: ${v.score}` } : null,
+    ]);
+  };
+
+  const actionRow = (v, wrapEl, idx, { discovery = false } = {}) => {
+    const menu = menuFor(v, wrapEl, idx, { discovery });
+    const moreBtn = el('button', {
+      class: 'btn icon', 'aria-label': 'Weitere Aktionen',
+      onclick: () => menu(moreBtn),
+    }, '···');
+    const primary = discovery
+      ? el('button', { class: 'btn', onclick: () => subscribeChannel(v) }, '+ Kanal')
+      : el('button', { class: 'btn', onclick: () => seenSingle(v, wrapEl) }, 'Gesehen');
+    return el('div', { class: 'actionrow' }, primary, moreBtn);
+  };
+
+  const attachLongPress = (node, v, wrapEl, idx, opts) => {
+    let timer = null; let sx = 0; let sy = 0; let fired = false;
+    node.addEventListener('pointerdown', (e) => {
+      if (!e.isPrimary || e.target.closest('button, a, .btn')) return;
+      sx = e.clientX; sy = e.clientY; fired = false;
+      timer = setTimeout(() => { fired = true; menuFor(v, wrapEl, idx, opts)(pointAnchor(sx, sy)); }, 450);
+    });
+    const cancel = (e) => {
+      if (e && Math.hypot(e.clientX - sx, e.clientY - sy) < 10 && e.type === 'pointermove') return;
+      clearTimeout(timer);
+    };
+    node.addEventListener('pointermove', cancel);
+    node.addEventListener('pointerup', () => clearTimeout(timer));
+    node.addEventListener('pointercancel', () => clearTimeout(timer));
+    node.addEventListener('click', (e) => {
+      if (fired) { e.stopPropagation(); e.preventDefault(); fired = false; }
+    }, true);
+  };
+
+  // --- Kartentypen ---
+
+  const heroCard = (o, idx) => {
+    const v = o.video;
+    const body = el('div', { class: 'card-body' },
+      overline(v, o.exploration, { discovery: v.source === 'discovery' }),
+      el('h3', { class: 'hero-title' }, v.title),
+      v.reason ? el('p', { class: 'reason hero-reason' }, v.reason) : null);
+    const card = el('article', {
+      class: 'card hero', dataset: { id: v.id, idx: String(idx), channelId: v.channelId },
+    }, thumbShell(v, { rounded: '18px 18px 0 0' }), body);
+    // Erst jetzt, denn die Aktionszeile braucht eine Referenz auf die Karte.
+    body.append(actionRow(v, card, idx, { discovery: v.source === 'discovery' }));
+    makeTappable(card, v);
+    attachLongPress(card, v, card, idx, { discovery: v.source === 'discovery' });
+    return card;
+  };
+
+  const gridCard = (o, idx) => {
+    const v = o.video;
+    const body = el('div', { class: 'card-body' },
+      overline(v, o.exploration),
+      el('h3', { class: 'card-title' }, v.title),
+      v.reason ? el('p', { class: 'reason' }, v.reason) : null);
+    const card = el('article', {
+      class: 'card sec', dataset: { id: v.id, idx: String(idx), channelId: v.channelId },
+    }, thumbShell(v, { rounded: '16px 16px 0 0' }), body);
+    body.append(actionRow(v, card, idx));
+    makeTappable(card, v);
+    attachLongPress(card, v, card, idx, {});
+    return card;
+  };
+
+  const rowItem = (o, idx) => {
+    const v = o.video;
+    const rowWrap = el('div', {
+      class: 'row-wrap', dataset: { id: v.id, idx: String(idx), channelId: v.channelId },
+    });
+    const under = el('div', { class: 'row-under', 'aria-hidden': 'true' },
+      el('span', { class: 'row-under-label' }, '✓ Gesehen'));
+    const bylineParts = [v.channelTitle, fmtAge(v.publishedAt)];
+    if (!v.liveStatus) bylineParts.push(fmtMins(v.durationSec));
+    const row = el('div', { class: 'row-item' },
+      thumbShell(v),
+      el('div', { class: 'row-body' },
+        o.exploration ? el('div', { class: 'overline' }, el('span', { class: 'ov-warn' }, 'Ausprobiert für dich')) : null,
+        el('h3', { class: 'row-title' }, v.title),
+        el('div', { class: 'byline' },
+          v.liveStatus === 'live' ? el('span', { class: 'ov-good' }, 'Live · ') : null,
+          v.liveStatus === 'upcoming' ? el('span', { class: 'ov-warn' }, 'Premiere · ') : null,
+          bylineParts.join(' · ')),
+        v.reason ? el('p', { class: 'reason' }, v.reason) : null,
+        actionRow(v, rowWrap, idx)));
+    rowWrap.append(under, row);
+    makeTappable(row, v);
+    attachSwipe(rowWrap, row, {
+      onCommit: () => seenSingle(v, rowWrap),
+      onLongPress: (x, y) => menuFor(v, rowWrap, idx, {})(pointAnchor(x, y)),
+    });
+    return rowWrap;
+  };
+
+  const discoverCard = (o, idx) => {
+    const v = o.video;
+    const bylineParts = [v.channelTitle, fmtAge(v.publishedAt)];
+    if (!v.liveStatus) bylineParts.push(fmtMins(v.durationSec));
+    if (v.viewCount) bylineParts.push(`${fmtCount(v.viewCount)} Aufrufe`); // begründet die Aufruf-Hürde
+    const body = el('div', { class: 'card-body' },
+      el('h3', { class: 'card-title' }, v.title),
+      el('div', { class: 'byline' }, bylineParts.join(' · ')),
+      v.reason ? el('p', { class: 'reason' }, v.reason) : null);
+    const card = el('article', {
+      class: 'card disc', dataset: { id: v.id, idx: String(idx), channelId: v.channelId },
+    }, thumbShell(v, { rounded: '14px 14px 0 0' }), body);
+    body.append(actionRow(v, card, idx, { discovery: true }));
+    makeTappable(card, v);
+    attachLongPress(card, v, card, idx, { discovery: true });
+    return card;
+  };
+
+  // --- Zusammenbauen: Hero, Sektionen, Entdeckungs-Block, Feed-Ende ---
+
+  const globalIdx = new Map(ordered.map((o, i) => [o.video.id, i]));
+  wrap.append(heroCard(hero, 0));
+
+  const buckets = new Map();
+  for (const o of stream) {
+    const b = dayBucket(o.video.publishedAt);
+    if (!buckets.has(b)) buckets.set(b, []);
+    buckets.get(b).push(o);
+  }
+
+  const discoverBlock = () => {
+    if (!discoveries.length) return null;
+    const useScroller = discoveries.length >= 3;
+    const holder = el('div', { class: useScroller ? 'discover-row' : 'discover-stack' },
+      ...discoveries.map((o) => discoverCard(o, globalIdx.get(o.video.id))));
+    return el('section', { class: 'discover-block' },
+      el('h2', { class: 'section-title' }, 'Außerhalb deiner Abos'),
+      el('p', { class: 'discover-sub' }, 'Vorschläge von Kanälen, die du nicht abonniert hast.'),
+      holder);
+  };
+
+  let discoverPlaced = false;
+  let firstSection = true;
+  for (const [name, members] of buckets) {
+    const head = el('div', { class: 'section-head' },
+      el('h2', { class: 'section-title' }, name),
+      el('button', {
+        class: 'btn ghost',
+        onclick: () => bulkSeen(members.map((o) => o.video.id), (n) => `${name}: ${n} als gesehen markiert`),
+      }, 'Alle gesehen'));
+    const section = el('section', { class: 'day-section' }, head);
+
+    const cards = members.filter((o) => cardSet.has(o.video.id));
+    const rows = members.filter((o) => !cardSet.has(o.video.id));
+    if (cards.length) section.append(el('div', { class: 'grid2' },
+      ...cards.map((o) => gridCard(o, globalIdx.get(o.video.id)))));
+    for (const o of rows) section.append(rowItem(o, globalIdx.get(o.video.id)));
+    wrap.append(section);
+
+    if (firstSection && members.length >= 3 && discoveries.length) {
+      const block = discoverBlock();
+      if (block) { wrap.append(block); discoverPlaced = true; }
+    }
+    firstSection = false;
+  }
+  if (!discoverPlaced && discoveries.length) wrap.append(discoverBlock());
+
+  wrap.append(el('div', { class: 'feed-end card' },
+    el('p', { class: 'feed-end-title' }, 'Ende erreicht'),
+    el('button', {
+      class: 'btn',
+      onclick: () => bulkSeen(ordered.map((o) => o.video.id), (n) => `${n} als gesehen markiert`),
+    }, `Alle ${ordered.length} als gesehen markieren`),
+    rejectedTotal
+      ? el('a', { class: 'feed-end-link', href: '#/status' }, `${rejectedTotal} ausgefiltert — Details im Status`)
+      : null));
+
+  // Erststart-Coaching: die oberste Zeile zeigt einmal, dass Wischen geht.
+  if (!reducedMotion()) {
+    db.kvGet('swipeHintShown', false).then((shown) => {
+      if (shown) return;
+      const firstRow = wrap.querySelector('.row-item');
+      if (!firstRow) return;
+      setTimeout(() => {
+        firstRow.style.transition = 'transform 300ms ease';
+        firstRow.style.transform = 'translateX(24px)';
+        setTimeout(() => { firstRow.style.transform = ''; }, 1200);
+        db.kvSet('swipeHintShown', true);
+      }, 800);
+    });
+  }
+
   return wrap;
-}
-
-/**
- * Daumen-Knopf.
- *
- * Wichtig: `event.currentTarget` wird vom Browser auf `null` gesetzt, sobald
- * die Ereignisbehandlung zurückkehrt — also beim ersten `await`. Wer es danach
- * liest, bekommt einen TypeError, und alles was folgt (auch die Rückmeldung an
- * dich) läuft nie. Deshalb das Element vorher festhalten und die Markierung
- * sofort setzen; das Schreiben in die Datenbank passiert danach.
- */
-function thumbButton(video, value, label, title, onNegative = null) {
-  const btn = el('button', {
-    class: 'btn icon', title,
-    onclick: async () => {
-      const good = value > 0;
-      btn.classList.toggle('on-good', good);
-      btn.classList.toggle('on-bad', !good);
-      const gegenstueck = btn.parentElement?.querySelector(good ? '.on-bad' : '.on-good');
-      if (gegenstueck && gegenstueck !== btn) gegenstueck.classList.remove('on-good', 'on-bad');
-      try {
-        await recordFeedback(video.id, 'thumb', value);
-        if (good) {
-          // Daumen hoch heisst nicht „erledigt" — das Video bleibt stehen,
-          // du willst es ja noch sehen.
-          toast('Notiert: mehr davon.');
-        } else {
-          await updateVideo(video.id, { watched: true });
-          toast('Notiert: weniger davon.');
-          onNegative?.();
-        }
-      } catch (e) {
-        btn.classList.remove('on-good', 'on-bad');
-        toast(`Bewertung konnte nicht gespeichert werden: ${e.message}`, 'error');
-      }
-    },
-  }, label);
-  return btn;
-}
-
-/**
- * Nach einem „Gesehen" anbieten, gleich alle älteren mitzunehmen. Steckt im
- * Toast statt in einem eigenen Knopf pro Zeile — sonst hätte jede Zeile sechs
- * Knöpfe, nur damit einer davon einmal am Tag gebraucht wird.
- */
-function offerOlder(index, markFromIndex) {
-  const host = document.getElementById('toast-host');
-  const box = el('div', { class: 'toast', style: 'pointer-events:auto' },
-    el('span', {}, 'Gesehen. '),
-    el('button', {
-      class: 'btn ghost',
-      onclick: async () => { box.remove(); await markFromIndex(index); },
-    }, 'Auch alle älteren'));
-  host.append(box);
-  setTimeout(() => box.remove(), 6000);
-}
-
-function feedItem(v, exploration, { index = 0, markFromIndex = null } = {}) {
-  const open = () => { location.hash = `#/v/${v.id}`; };
-
-  const entdeckt = v.source === 'discovery';
-
-  const badges = el('div', { class: 'badges' },
-    entdeckt ? el('span', { class: 'badge discover' }, 'Entdeckt · nicht abonniert') : null,
-    exploration ? el('span', { class: 'badge explore' }, 'Ausprobiert für dich') : null,
-    v.score != null ? el('span', { class: 'badge score' }, `Score ${v.score}`) : null,
-    v.liveStatus === 'live' ? el('span', { class: 'badge' }, 'Live') : null,
-    v.liveStatus === 'upcoming' ? el('span', { class: 'badge' }, 'Premiere') : null,
-    !v.embeddable ? el('span', { class: 'badge' }, 'nur in YouTube') : null);
-
-  const item = el('div', { class: 'item', dataset: { id: v.id } },
-    el('button', { class: 'thumb', onclick: open, 'aria-label': `Video öffnen: ${v.title}` },
-      v.thumb ? el('img', { src: v.thumb, alt: '', loading: 'lazy', decoding: 'async' }) : null,
-      el('span', { class: 'dur' }, fmtDuration(v.durationSec))),
-    el('div', {},
-      el('button', { class: 'title', onclick: open }, v.title),
-      el('div', { class: 'byline' },
-        `${v.channelTitle} · ${fmtAge(v.publishedAt)}`
-        + (v.viewCount ? ` · ${fmtCount(v.viewCount)} Aufrufe` : '')),
-      badges.children.length ? badges : null,
-      v.reason ? el('p', { class: 'reason' }, v.reason) : null,
-      el('div', { class: 'actions' },
-        thumbButton(v, 1, '👍', 'Mehr davon'),
-        // Daumen runter räumt die Zeile gleich weg — „weniger davon" und dann
-        // steht es trotzdem noch da wäre die falsche Antwort.
-        thumbButton(v, -1, '👎', 'Weniger davon — und weg damit', () => item.remove()),
-        el('a', {
-          class: 'btn', href: watchUrl(v.id), target: '_blank', rel: 'noopener',
-          // Wer hier tippt, geht schauen. Beim Zurückkommen einmal nachfragen,
-          // sonst bleibt das Video für immer ungesehen im Feed stehen.
-          onclick: () => armReturnPrompt(v),
-        }, 'In YouTube'),
-        el('button', {
-          class: 'btn',
-          onclick: async () => {
-            // Neutral: kein Signal an den Filter. „Schon gesehen" heisst nicht
-            // „gefällt mir nicht" — vorher stand hier ein Minuspunkt.
-            await updateVideo(v.id, { watched: true });
-            item.remove();
-            if (markFromIndex) offerOlder(index, markFromIndex);
-          },
-        }, 'Gesehen'),
-        // Nur bei Entdeckungen: den Kanal dauerhaft aufnehmen oder loswerden.
-        entdeckt ? el('button', {
-          class: 'btn',
-          onclick: async () => {
-            const s = await S.load();
-            try {
-              const kanal = await yt.resolveChannel(v.channelId, s.ytKey);
-              await db.put('channels', kanal);
-              // Sonst wäre der Kanal gleichzeitig abonniert und blockiert.
-              await unblockChannel(v.channelId);
-              toast(`„${kanal.title}" abonniert.`);
-              render();
-            } catch (e) {
-              toast(`Konnte nicht abonnieren: ${e.message}`, 'error');
-            }
-          },
-        }, '+ Kanal') : null,
-        entdeckt ? el('button', {
-          class: 'btn danger',
-          onclick: async () => {
-            await blockChannel(v.channelId);
-            const abonniert = await db.get('channels', v.channelId);
-            toast(abonniert
-              // „Nie wieder" betrifft nur Vorschläge. Ein Abo stillschweigend
-              // zu kündigen wäre mehr, als der Knopf verspricht.
-              ? `„${v.channelTitle}" wird nicht mehr vorgeschlagen — dein Abo bleibt bestehen.`
-              : `„${v.channelTitle}" wird nicht mehr vorgeschlagen.`);
-            render();
-          },
-        }, 'Nie wieder') : null)));
-
-  return item;
 }
 
 // ---------- Video-Detail ----------
@@ -433,7 +926,7 @@ async function viewVideo(id) {
         btn.classList.toggle('on-bad', !good);
         try {
           await recordFeedback(v.id, 'thumb', value);
-          await updateVideo(v.id, { watched: true });
+          await updateVideo(v.id, { watched: true, rating: value });
           toast(good ? 'Notiert: mehr davon.' : 'Notiert: weniger davon.');
         } catch (e) {
           btn.classList.remove('on-good', 'on-bad');
@@ -1089,8 +1582,16 @@ const routes = [
   [/^#\/status$/, viewStatus],
 ];
 
+// Scrollposition pro Route: Zurück aus dem Detail landet exakt dort, wo du
+// warst. Vorher sprang jede Navigation und jede Aktion an den Seitenanfang —
+// bei 180 Videos ist die Scrollposition aber der Arbeitsstand.
+const scrollMem = new Map();
+let currentRoute = location.hash || '#/';
+
 async function render() {
   const hash = location.hash || '#/';
+  scrollMem.set(currentRoute, window.scrollY);
+  if (hash !== currentRoute) dismissUndo(); // Undo gilt für die Seite, auf der es entstand
   flushPendingSettings = null; // gilt nur, solange die Einstellungen offen sind
   for (const link of document.querySelectorAll('.tabs a')) {
     const active = link.getAttribute('href') === hash
@@ -1111,7 +1612,14 @@ async function render() {
         el('strong', {}, 'Etwas ist schiefgegangen'),
         el('p', {}, e.message)));
     }
-    window.scrollTo(0, 0);
+    const target = scrollMem.get(hash) ?? 0;
+    currentRoute = hash;
+    // Synchron nach replaceChildren — Layout steht zu diesem Zeitpunkt schon.
+    // Bewusst KEIN requestAnimationFrame: das feuert in Hintergrund-Tabs nie,
+    // und die Position wäre beim Zurückwechseln verloren. Der Nachschlag nach
+    // 60ms überstimmt die browsereigene History-Restauration.
+    window.scrollTo(0, target);
+    setTimeout(() => window.scrollTo(0, target), 60);
     return;
   }
   location.hash = '#/';
@@ -1123,10 +1631,23 @@ document.getElementById('sync-btn').addEventListener('click', runSync);
 document.getElementById('nav-feed').addEventListener('click', () => { location.hash = '#/'; });
 window.addEventListener('hashchange', render);
 
+// Sticky-Sektionsköpfe brauchen die echte Topbar-Höhe (sie bricht auf dem
+// iPhone in zwei Zeilen um).
+function setTopbarHeight() {
+  const tb = document.querySelector('.topbar');
+  if (tb) document.documentElement.style.setProperty('--topbar-h', `${tb.offsetHeight}px`);
+}
+window.addEventListener('resize', setTopbarHeight);
+
 (async function start() {
+  // Wir stellen die Scrollposition selbst wieder her — der Browser soll bei
+  // Hash-Navigation nicht dazwischenfunken.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   await db.open();
   await S.load();
+  setTopbarHeight();
   await render();
+  setTopbarHeight();
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => { /* offline-Schale ist optional */ });
