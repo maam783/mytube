@@ -300,3 +300,7 @@ sw.js                 Offline-Schale
 `js/anthropic.js` ist das offizielle `@anthropic-ai/sdk` (v0.116.0), mit esbuild
 für den Browser gebündelt. Bewusst mitgeliefert statt vom CDN geladen: keine
 Laufzeit-Abhängigkeit, funktioniert offline, keine Überraschungen unterwegs.
+
+Wie das alles innen funktioniert und warum es so gebaut ist — inklusive der
+Fallen, die unterwegs Zeit gekostet haben — steht in
+**[ARCHITEKTUR.md](ARCHITEKTUR.md)**.
